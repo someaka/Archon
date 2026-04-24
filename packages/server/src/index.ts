@@ -63,6 +63,7 @@ import { MessagePersistence } from './adapters/web/persistence';
 import { SSETransport } from './adapters/web/transport';
 import { WorkflowEventBridge } from './adapters/web/workflow-bridge';
 import { registerApiRoutes } from './routes/api';
+import { validateAiCredentials } from './credentials';
 import {
   handleMessage,
   pool,
@@ -152,25 +153,23 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
 
   // Validate AI assistant credentials (warn if missing, don't fail)
   // Using || intentionally: empty string should be treated as missing credential
-  // CLAUDE_USE_GLOBAL_AUTH=true: Use Claude Code's built-in OAuth (from `claude /login`)
-  const hasClaudeCredentials = Boolean(
-    process.env.CLAUDE_API_KEY ||
-    process.env.CLAUDE_CODE_OAUTH_TOKEN ||
-    process.env.CLAUDE_USE_GLOBAL_AUTH
-  );
-  const hasCodexCredentials = process.env.CODEX_ID_TOKEN && process.env.CODEX_ACCESS_TOKEN;
+  // CLAUDE_USE_GLOBAL_AUTH=*** Use Claude Code's built-in OAuth (from `claude /login`)
+  const { hasClaudeCredentials, hasCodexCredentials, hasHermesCredentials, hasAnyCredentials } =
+    validateAiCredentials(process.env);
 
-  if (!hasClaudeCredentials && !hasCodexCredentials) {
+  if (!hasAnyCredentials) {
     getLog().fatal(
       {
         checked: {
           claude: ['CLAUDE_API_KEY', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_USE_GLOBAL_AUTH'],
           codex: ['CODEX_ID_TOKEN', 'CODEX_ACCESS_TOKEN'],
+          hermes: ['HERMES_MODEL', 'HERMES_BINARY_PATH', 'HERMES_API_KEY'],
         },
         hints: [
-          'Set CLAUDE_USE_GLOBAL_AUTH=true in .env (requires `claude /login` first)',
+          'Set CLAUDE_USE_GLOBAL_AUTH=*** in .env (requires `claude /login` first)',
           'Or set CLAUDE_API_KEY in .env',
           'Or set CODEX_ID_TOKEN + CODEX_ACCESS_TOKEN in .env',
+          'Or set HERMES_MODEL in .env',
           'See .env.example for all options',
         ],
         envFile: BUNDLED_IS_BINARY ? getArchonEnvPath() : envPath,
@@ -190,6 +189,12 @@ export async function startServer(opts: ServerOptions = {}): Promise<void> {
     getLog().warn(
       { checked: ['CODEX_ID_TOKEN', 'CODEX_ACCESS_TOKEN'] },
       'codex_credentials_missing'
+    );
+  }
+  if (!hasHermesCredentials) {
+    getLog().warn(
+      { checked: ['HERMES_MODEL', 'HERMES_BINARY_PATH', 'HERMES_API_KEY'] },
+      'hermes_credentials_missing'
     );
   }
 

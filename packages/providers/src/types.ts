@@ -98,6 +98,19 @@ export interface PiProviderDefaults {
   maxConcurrent?: number;
 }
 
+export interface HermesProviderDefaults {
+  /** Hermes model name (e.g., "qwen2.5-coder:32b", "hermes:ollama/llama3.1") */
+  model?: string;
+  /** LLM provider backend: ollama, openrouter, openai, anthropic */
+  provider?: string;
+  /** Custom API endpoint (defaults to Ollama localhost for ollama provider) */
+  endpoint?: string;
+  /** Whether to use globally configured auth (e.g. OPENAI_API_KEY, ANTHROPIC_API_KEY) */
+  globalAuth?: boolean;
+  /** Path to the hermes CLI binary */
+  hermesBinaryPath?: string;
+}
+
 /** Generic per-provider defaults bag used by config surfaces and UI. */
 export type ProviderDefaults = Record<string, unknown>;
 

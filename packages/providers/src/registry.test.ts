@@ -49,6 +49,7 @@ function makeMockRegistration(
     displayName: `Mock ${id}`,
     factory: () => makeMockProvider(id),
     capabilities: makeMockProvider(id).getCapabilities(),
+    isModelCompatible: () => true,
     builtIn: false,
     ...overrides,
   };
@@ -77,10 +78,16 @@ describe('registry', () => {
       expect(typeof provider.sendQuery).toBe('function');
     });
 
+    test('returns HermesProvider for hermes type', () => {
+      const provider = getAgentProvider('hermes');
+      expect(provider).toBeDefined();
+      expect(provider.getType()).toBe('hermes');
+    });
+
     test('throws UnknownProviderError for unknown type', () => {
       expect(() => getAgentProvider('unknown')).toThrow(UnknownProviderError);
       expect(() => getAgentProvider('unknown')).toThrow(
-        "Unknown provider: 'unknown'. Available: claude, codex"
+        "Unknown provider: 'unknown'. Available: claude, codex, hermes"
       );
     });
 
@@ -133,6 +140,38 @@ describe('registry', () => {
       expect(caps.envInjection).toBe(true);
     });
 
+    test('returns Hermes capabilities without instantiation', () => {
+      const caps = getProviderCapabilities('hermes');
+      expect(caps.sessionResume).toBe(false);
+      expect(caps.mcp).toBe(false);
+      expect(caps.hooks).toBe(false);
+      expect(caps.skills).toBe(true);
+      expect(caps.envInjection).toBe(true);
+    });
+
+    test('matches runtime getCapabilities for Hermes', () => {
+      const staticCaps = getProviderCapabilities('hermes');
+      const runtimeCaps = getAgentProvider('hermes').getCapabilities();
+      expect(staticCaps).toEqual(runtimeCaps);
+    });
+
+    test('Hermes registration declares conservative v1 capabilities', () => {
+      const caps = getProviderCapabilities('hermes');
+      expect(caps.sessionResume).toBe(false);
+      expect(caps.mcp).toBe(false);
+      expect(caps.hooks).toBe(false);
+      expect(caps.skills).toBe(true);
+      expect(caps.agents).toBe(false);
+      expect(caps.toolRestrictions).toBe(false);
+      expect(caps.structuredOutput).toBe(false);
+      expect(caps.envInjection).toBe(true);
+      expect(caps.costControl).toBe(false);
+      expect(caps.effortControl).toBe(false);
+      expect(caps.thinkingControl).toBe(false);
+      expect(caps.fallbackModel).toBe(true);
+      expect(caps.sandbox).toBe(false);
+    });
+
     test('matches runtime getCapabilities for Claude', () => {
       const staticCaps = getProviderCapabilities('claude');
       const runtimeCaps = getAgentProvider('claude').getCapabilities();
@@ -182,6 +221,7 @@ describe('registry', () => {
       expect(reg.displayName).toBe('Claude (Anthropic)');
       expect(reg.builtIn).toBe(true);
       expect(typeof reg.factory).toBe('function');
+      expect(typeof reg.isModelCompatible).toBe('function');
     });
 
     test('throws for unknown provider', () => {
@@ -192,23 +232,24 @@ describe('registry', () => {
   describe('getRegisteredProviders', () => {
     test('returns all registered providers', () => {
       const all = getRegisteredProviders();
-      expect(all.length).toBe(2);
+      expect(all.length).toBe(3);
       const ids = all.map(r => r.id);
       expect(ids).toContain('claude');
       expect(ids).toContain('codex');
+      expect(ids).toContain('hermes');
     });
 
     test('includes community providers after registration', () => {
       registerProvider(makeMockRegistration('my-llm'));
       const all = getRegisteredProviders();
-      expect(all.length).toBe(3);
+      expect(all.length).toBe(4);
     });
   });
 
   describe('getProviderInfoList', () => {
     test('returns API-safe projection without factory', () => {
       const infos = getProviderInfoList();
-      expect(infos.length).toBe(2);
+      expect(infos.length).toBe(3);
       for (const info of infos) {
         expect(info).toHaveProperty('id');
         expect(info).toHaveProperty('displayName');
@@ -224,6 +265,7 @@ describe('registry', () => {
     test('returns true for registered providers', () => {
       expect(isRegisteredProvider('claude')).toBe(true);
       expect(isRegisteredProvider('codex')).toBe(true);
+      expect(isRegisteredProvider('hermes')).toBe(true);
     });
 
     test('returns false for unknown providers', () => {
@@ -237,7 +279,7 @@ describe('registry', () => {
       registerBuiltinProviders();
       registerBuiltinProviders();
       const all = getRegisteredProviders();
-      expect(all.length).toBe(2);
+      expect(all.length).toBe(3);
     });
   });
 
@@ -246,6 +288,35 @@ describe('registry', () => {
       clearRegistry();
       expect(getRegisteredProviders()).toEqual([]);
       expect(isRegisteredProvider('claude')).toBe(false);
+    });
+  });
+
+  describe('built-in model compatibility', () => {
+    test('Claude registration matches Claude model patterns', () => {
+      const reg = getRegistration('claude');
+      expect(reg.isModelCompatible('sonnet')).toBe(true);
+      expect(reg.isModelCompatible('opus')).toBe(true);
+      expect(reg.isModelCompatible('haiku')).toBe(true);
+      expect(reg.isModelCompatible('inherit')).toBe(true);
+      expect(reg.isModelCompatible('claude-3.5-sonnet')).toBe(true);
+      expect(reg.isModelCompatible('gpt-4')).toBe(false);
+    });
+
+    test('Codex registration rejects Claude model patterns', () => {
+      const reg = getRegistration('codex');
+      expect(reg.isModelCompatible('sonnet')).toBe(false);
+      expect(reg.isModelCompatible('claude-3.5-sonnet')).toBe(false);
+      expect(reg.isModelCompatible('inherit')).toBe(false);
+      expect(reg.isModelCompatible('gpt-4')).toBe(true);
+      expect(reg.isModelCompatible('o3-mini')).toBe(true);
+    });
+
+    test('Hermes isModelCompatible accepts hermes refs', () => {
+      const reg = getRegistration('hermes');
+      expect(reg.isModelCompatible('hermes')).toBe(true);
+      expect(reg.isModelCompatible('hermes:ollama/llama3.1')).toBe(true);
+      expect(reg.isModelCompatible('sonnet')).toBe(false);
+      expect(reg.isModelCompatible('gpt-4')).toBe(false);
     });
   });
 
@@ -302,6 +373,17 @@ describe('registry', () => {
       expect(caps.sandbox).toBe(false);
     });
 
+    test('isModelCompatible accepts provider/model refs, rejects aliases', () => {
+      registerPiProvider();
+      const reg = getRegistration('pi');
+      expect(reg.isModelCompatible('google/gemini-2.5-pro')).toBe(true);
+      expect(reg.isModelCompatible('anthropic/claude-opus-4-5')).toBe(true);
+      expect(reg.isModelCompatible('openrouter/qwen/qwen3-coder')).toBe(true);
+      expect(reg.isModelCompatible('sonnet')).toBe(false);
+      expect(reg.isModelCompatible('claude-3.5-sonnet')).toBe(false);
+      expect(reg.isModelCompatible('')).toBe(false);
+    });
+
     test('appears in getProviderInfoList with builtIn: false', () => {
       registerPiProvider();
       const info = getProviderInfoList().find(p => p.id === 'pi');
@@ -315,7 +397,7 @@ describe('registry', () => {
       const ids = getRegisteredProviders()
         .map(p => p.id)
         .sort();
-      expect(ids).toEqual(['claude', 'codex', 'pi']);
+      expect(ids).toEqual(['claude', 'codex', 'hermes', 'pi']);
     });
   });
 });

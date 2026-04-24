@@ -571,6 +571,53 @@ function AssistantConfigSection({ config }: { config: SafeConfigResponse }): Rea
                 );
               }
 
+              if (provider.id === 'hermes') {
+                return (
+                  <div
+                    key={provider.id}
+                    className="grid grid-cols-[140px_1fr] items-center gap-2 text-sm"
+                  >
+                    <div className="font-medium">{provider.displayName}</div>
+                    <div className="text-muted-foreground">Built-in provider settings</div>
+
+                    <label htmlFor="hermes-model">Model</label>
+                    <Input
+                      id="hermes-model"
+                      value={(providerSettings.model as string | undefined) ?? ''}
+                      onChange={e => {
+                        updateProviderSettings('hermes', { model: e.target.value });
+                      }}
+                      placeholder="qwen2.5-coder:32b"
+                    />
+
+                    <label htmlFor="hermes-provider">Provider</label>
+                    <select
+                      id="hermes-provider"
+                      value={(providerSettings.provider as string | undefined) ?? 'ollama'}
+                      onChange={e => {
+                        updateProviderSettings('hermes', { provider: e.target.value });
+                      }}
+                      className={selectClass}
+                    >
+                      <option value="ollama">Ollama</option>
+                      <option value="openrouter">OpenRouter</option>
+                      <option value="openai">OpenAI</option>
+                      <option value="anthropic">Anthropic</option>
+                    </select>
+
+                    <label htmlFor="hermes-endpoint">Endpoint</label>
+                    <Input
+                      id="hermes-endpoint"
+                      value={(providerSettings.endpoint as string | undefined) ?? ''}
+                      onChange={e => {
+                        updateProviderSettings('hermes', { endpoint: e.target.value });
+                      }}
+                      placeholder="http://localhost:11434/v1"
+                    />
+                  </div>
+                );
+              }
+
               return (
                 <div key={provider.id} className="rounded-md border border-border p-3 text-sm">
                   <div className="font-medium">{provider.displayName}</div>

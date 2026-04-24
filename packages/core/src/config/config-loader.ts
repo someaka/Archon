@@ -96,6 +96,7 @@ function mergeAssistantDefaults(
 const SAFE_ASSISTANT_FIELDS: Record<string, readonly string[]> = {
   claude: ['model'],
   codex: ['model', 'modelReasoningEffort', 'webSearchMode'],
+  hermes: ['model', 'provider', 'endpoint'],
   // community providers — list each field we're confident is safe to
   // show in the web UI. Unknown providers fall through with no fields.
   pi: ['model'],
@@ -268,7 +269,7 @@ function getDefaults(): MergedConfig {
   // registry.ts#registerCommunityProviders`), so by the time this runs the
   // registry is populated.
   const providers = getRegisteredProviders();
-  const registeredAssistants: AssistantDefaults = { claude: {}, codex: {} };
+  const registeredAssistants: AssistantDefaults = { claude: {}, codex: {}, hermes: {} };
   for (const provider of providers) {
     if (!(provider.id in registeredAssistants)) {
       registeredAssistants[provider.id] = {};
@@ -353,6 +354,24 @@ function applyEnvOverrides(config: MergedConfig): MergedConfig {
     if (!isNaN(parsed) && parsed > 0) {
       config.concurrency.maxConversations = parsed;
     }
+  }
+
+  // Hermes env overrides
+  const hermesModel = process.env.HERMES_MODEL;
+  if (hermesModel) {
+    config.assistants.hermes = { ...(config.assistants.hermes ?? {}), model: hermesModel };
+  }
+  const hermesProvider = process.env.HERMES_PROVIDER;
+  if (hermesProvider) {
+    config.assistants.hermes = { ...(config.assistants.hermes ?? {}), provider: hermesProvider };
+  }
+  const hermesEndpoint = process.env.HERMES_ENDPOINT;
+  if (hermesEndpoint) {
+    config.assistants.hermes = { ...(config.assistants.hermes ?? {}), endpoint: hermesEndpoint };
+  }
+  const hermesBinaryPath = process.env.HERMES_BINARY_PATH;
+  if (hermesBinaryPath) {
+    config.assistants.hermes = { ...(config.assistants.hermes ?? {}), hermesBinaryPath };
   }
 
   return config;

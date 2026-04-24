@@ -18,6 +18,7 @@ import type {
   ProviderDefaultsMap,
   ProviderCapabilities,
 } from '@archon/providers/types';
+import type { HermesProviderDefaults } from '@archon/providers';
 
 // Re-export provider types so existing workflow engine consumers don't break
 export type {
@@ -95,6 +96,7 @@ export interface WorkflowConfig {
       webSearchMode?: WebSearchMode;
       additionalDirectories?: string[];
     };
+    hermes?: HermesProviderDefaults;
   };
 }
 

@@ -84,7 +84,8 @@ async function collectFiles(dir: string, extensions: readonly string[]): Promise
     // line-ending policy (e.g. Windows `core.autocrlf=true` yields CRLF).
     const content = raw.replace(/\r\n/g, '\n');
     if (!content.trim()) {
-      throw new Error(`Bundled default "${entry}" in ${dir} is empty.`);
+      console.warn(`Skipping empty bundled default "${entry}" in ${dir}.`);
+      continue;
     }
     files.push({ name, content });
   }

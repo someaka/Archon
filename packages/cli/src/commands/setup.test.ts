@@ -15,6 +15,8 @@ import {
   writeScopedEnv,
   serializeEnv,
   resolveScopedEnvPath,
+  validateHermesEndpoint,
+  validateHermesBinaryPath,
 } from './setup';
 import * as setupModule from './setup';
 import { copyArchonSkill } from './skill';
@@ -116,6 +118,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: {
@@ -137,6 +140,31 @@ CODEX_ACCOUNT_ID=account1
       expect(content).not.toMatch(/^DATABASE_URL=/m);
     });
 
+    it('should generate valid .env content for PostgreSQL configuration', () => {
+      const content = generateEnvContent({
+        database: { type: 'postgresql', url: 'postgresql://localhost:5432/archon' },
+        ai: {
+          claude: true,
+          claudeAuthType: 'apiKey',
+          claudeApiKey: 'sk-test-key',
+          codex: false,
+          hermes: false,
+          defaultAssistant: 'claude',
+        },
+        platforms: {
+          github: false,
+          telegram: false,
+          slack: false,
+          discord: false,
+        },
+        botDisplayName: 'Archon',
+      });
+
+      expect(content).toContain('DATABASE_URL=postgresql://localhost:5432/archon');
+      expect(content).toContain('CLAUDE_USE_GLOBAL_AUTH=false');
+      expect(content).toContain('CLAUDE_API_KEY=sk-test-key');
+    });
+
     it('emits CLAUDE_BIN_PATH when claudeBinaryPath is configured', () => {
       const content = generateEnvContent({
         ai: {
@@ -144,6 +172,7 @@ CODEX_ACCOUNT_ID=account1
           claudeAuthType: 'global',
           claudeBinaryPath: '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: { github: false, telegram: false, slack: false },
@@ -161,6 +190,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: { github: false, telegram: false, slack: false },
@@ -176,6 +206,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: {
@@ -211,6 +242,7 @@ CODEX_ACCOUNT_ID=account1
         ai: {
           claude: false,
           codex: true,
+          hermes: false,
           codexTokens: {
             idToken: 'id-token',
             accessToken: 'access-token',
@@ -240,6 +272,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: {
@@ -259,6 +292,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: {
@@ -278,6 +312,7 @@ CODEX_ACCOUNT_ID=account1
           claude: true,
           claudeAuthType: 'global',
           codex: false,
+          hermes: false,
           defaultAssistant: 'claude',
         },
         platforms: {
@@ -297,6 +332,78 @@ CODEX_ACCOUNT_ID=account1
       expect(content).toContain('SLACK_APP_TOKEN=xapp-test');
       expect(content).toContain('SLACK_ALLOWED_USER_IDS=U123');
       expect(content).toContain('SLACK_STREAMING_MODE=batch');
+    });
+
+    it('should include Discord configuration', () => {
+      const content = generateEnvContent({
+        database: { type: 'sqlite' },
+        ai: {
+          claude: true,
+          claudeAuthType: 'global',
+          codex: false,
+          hermes: false,
+          defaultAssistant: 'claude',
+        },
+        platforms: {
+          github: false,
+          telegram: false,
+          slack: false,
+          discord: true,
+        },
+        discord: {
+          botToken: 'discord-bot-token-test',
+          allowedUserIds: '123456789',
+        },
+        botDisplayName: 'Archon',
+      });
+
+      expect(content).toContain('DISCORD_BOT_TOKEN=discord-bot-token-test');
+      expect(content).toContain('DISCORD_ALLOWED_USER_IDS=123456789');
+      expect(content).toContain('DISCORD_STREAMING_MODE=batch');
+    });
+
+    it('should include Hermes configuration when configured', () => {
+      const content = generateEnvContent({
+        database: { type: 'sqlite' },
+        ai: {
+          claude: false,
+          codex: false,
+          hermes: true,
+          hermesModel: 'qwen2.5-coder:32b',
+          hermesProvider: 'ollama',
+          hermesEndpoint: 'http://localhost:11434/v1',
+          hermesBinaryPath: '/usr/local/bin/hermes',
+          defaultAssistant: 'hermes',
+        },
+        platforms: { github: false, telegram: false, slack: false, discord: false },
+        botDisplayName: 'Archon',
+      });
+
+      expect(content).toContain('DEFAULT_AI_ASSISTANT=hermes');
+      expect(content).toContain('HERMES_MODEL=qwen2.5-coder:32b');
+      expect(content).toContain('HERMES_PROVIDER=ollama');
+      expect(content).toContain('HERMES_ENDPOINT=http://localhost:11434/v1');
+      expect(content).toContain('HERMES_BINARY_PATH=/usr/local/bin/hermes');
+    });
+
+    it('should omit Hermes fields when not configured', () => {
+      const content = generateEnvContent({
+        database: { type: 'sqlite' },
+        ai: {
+          claude: true,
+          claudeAuthType: 'global',
+          codex: false,
+          hermes: false,
+          defaultAssistant: 'claude',
+        },
+        platforms: { github: false, telegram: false, slack: false, discord: false },
+        botDisplayName: 'Archon',
+      });
+
+      expect(content).not.toContain('HERMES_MODEL=');
+      expect(content).not.toContain('HERMES_PROVIDER=');
+      expect(content).not.toContain('HERMES_ENDPOINT=');
+      expect(content).not.toContain('HERMES_BINARY_PATH=');
     });
   });
 

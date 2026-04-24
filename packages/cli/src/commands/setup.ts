@@ -63,6 +63,11 @@ interface SetupConfig {
     claudeBinaryPath?: string;
     codex: boolean;
     codexTokens?: CodexTokens;
+    hermes: boolean;
+    hermesModel?: string;
+    hermesProvider?: string;
+    hermesEndpoint?: string;
+    hermesBinaryPath?: string;
     defaultAssistant: string;
   };
   platforms: {
@@ -104,6 +109,7 @@ interface CodexTokens {
 interface ExistingConfig {
   hasClaude: boolean;
   hasCodex: boolean;
+  hasHermes: boolean;
   platforms: {
     github: boolean;
     telegram: boolean;
@@ -182,6 +188,27 @@ export function probeFileExists(path: string): boolean {
   return existsSync(path);
 }
 
+export function validateHermesEndpoint(url: string): string | undefined {
+  if (!url || url.trim().length === 0) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return 'Endpoint must use http:// or https://';
+    }
+    return undefined;
+  } catch {
+    return 'Please enter a valid URL';
+  }
+}
+
+export function validateHermesBinaryPath(path: string): string | undefined {
+  if (!path || path.trim().length === 0) return undefined;
+  if (!probeFileExists(path.trim())) {
+    return 'Path does not exist. Leave blank for PATH lookup.';
+  }
+  return undefined;
+}
+
 export function probeNpmRoot(): string | null {
   try {
     const out = execSync('npm root -g', {
@@ -251,6 +278,39 @@ export function detectClaudeExecutablePath(): string | null {
   return null;
 }
 
+export function probeWhichHermes(): string | null {
+  try {
+    const checkCmd = process.platform === 'win32' ? 'where' : 'which';
+    const resolved = execSync(`${checkCmd} hermes`, {
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    const first = resolved.split(/\r?\n/)[0]?.trim();
+    return first ?? null;
+  } catch {
+    return null;
+  }
+}
+
+export function detectHermesExecutablePath(): string | null {
+  const nativePath =
+    process.platform === 'win32'
+      ? join(homedir(), '.local', 'bin', 'hermes.exe')
+      : join(homedir(), '.local', 'bin', 'hermes');
+  if (probeFileExists(nativePath)) return nativePath;
+
+  const npmRoot = probeNpmRoot();
+  if (npmRoot) {
+    const npmCliJs = join(npmRoot, '@nousresearch', 'hermes-agent', 'cli.js');
+    if (probeFileExists(npmCliJs)) return npmCliJs;
+  }
+
+  const fromPath = probeWhichHermes();
+  if (fromPath && probeFileExists(fromPath)) return fromPath;
+
+  return null;
+}
+
 /**
  * Get Node.js version if installed, or null if not
  */
@@ -315,6 +375,20 @@ Install via npm:
 Requires Node.js 18 or later.
 After installation, run 'codex' to authenticate.`,
   },
+  hermes: {
+    name: 'Hermes Agent',
+    checkCommand: 'hermes',
+    instructions: `Hermes Agent CLI is not installed.
+
+Install using one of these methods:
+
+  pip install hermes-agent
+
+  Or via npm:
+    npm install -g @nousresearch/hermes-agent
+
+After installation, run: hermes --help`,
+  },
 };
 
 /**
@@ -342,6 +416,7 @@ export function checkExistingConfig(envPath?: string): ExistingConfig | null {
       hasEnvValue(content, 'CODEX_ACCESS_TOKEN') &&
       hasEnvValue(content, 'CODEX_REFRESH_TOKEN') &&
       hasEnvValue(content, 'CODEX_ACCOUNT_ID'),
+    hasHermes: hasEnvValue(content, 'HERMES_BINARY_PATH') || hasEnvValue(content, 'HERMES_MODEL'),
     platforms: {
       github: hasEnvValue(content, 'GITHUB_TOKEN') || hasEnvValue(content, 'GH_TOKEN'),
       telegram: hasEnvValue(content, 'TELEGRAM_BOT_TOKEN'),
@@ -553,6 +628,75 @@ async function collectClaudeAuth(): Promise<{
   return { authType: 'global' };
 }
 
+async function collectHermesConfig(): Promise<{
+  model: string;
+  provider: string;
+  endpoint?: string;
+  hermesBinaryPath?: string;
+}> {
+  const provider = await select({
+    message: 'Which LLM provider will Hermes use?',
+    options: [
+      { value: 'ollama', label: 'Ollama (local)', hint: 'Free, private, runs on your machine' },
+      { value: 'openrouter', label: 'OpenRouter', hint: '200+ models, single API key' },
+      { value: 'openai', label: 'OpenAI', hint: 'GPT models via API key' },
+      { value: 'anthropic', label: 'Anthropic', hint: 'Claude models via API key' },
+    ],
+  });
+
+  if (isCancel(provider)) {
+    cancel('Setup cancelled.');
+    process.exit(0);
+  }
+
+  const model = await text({
+    message: 'Enter the model name:',
+    placeholder: provider === 'ollama' ? 'qwen2.5-coder:32b' : 'claude-opus-4-6',
+    validate: value => {
+      if (!value || value.trim().length === 0) return 'Model name is required';
+      return undefined;
+    },
+  });
+
+  if (isCancel(model)) {
+    cancel('Setup cancelled.');
+    process.exit(0);
+  }
+
+  let endpoint: string | undefined;
+  if (provider === 'ollama') {
+    endpoint = 'http://localhost:11434/v1';
+  } else {
+    const customEndpoint = await text({
+      message: 'Enter the API endpoint (leave blank for provider default):',
+      placeholder: 'https://api.openrouter.ai/v1',
+      validate: value => validateHermesEndpoint(value ?? ''),
+    });
+    if (!isCancel(customEndpoint) && customEndpoint?.trim()) {
+      endpoint = customEndpoint.trim();
+    }
+  }
+
+  const binaryPath = await text({
+    message: 'Absolute path to the Hermes executable (leave blank for PATH lookup):',
+    placeholder: '/usr/local/bin/hermes',
+    validate: value => validateHermesBinaryPath(value ?? ''),
+  });
+
+  if (isCancel(binaryPath)) {
+    cancel('Setup cancelled.');
+    process.exit(0);
+  }
+
+  const trimmedBinary = binaryPath?.trim();
+  return {
+    model: model.trim(),
+    provider,
+    ...(endpoint ? { endpoint } : {}),
+    ...(trimmedBinary ? { hermesBinaryPath: trimmedBinary } : {}),
+  };
+}
+
 /**
  * Collect Codex authentication
  */
@@ -668,6 +812,7 @@ async function collectAIConfig(): Promise<SetupConfig['ai']> {
     options: [
       { value: 'claude', label: 'Claude (Recommended)', hint: 'Anthropic Claude Code SDK' },
       { value: 'codex', label: 'Codex', hint: 'OpenAI Codex SDK' },
+      { value: 'hermes', label: 'Hermes Agent', hint: 'Local or cloud via OpenRouter/Ollama' },
     ],
     required: false,
   });
@@ -679,6 +824,7 @@ async function collectAIConfig(): Promise<SetupConfig['ai']> {
 
   let hasClaude = assistants.includes('claude');
   let hasCodex = assistants.includes('codex');
+  let hasHermes = assistants.includes('hermes');
 
   // Check if selected CLI tools are installed
   if (hasClaude && !isCommandAvailable('claude')) {
@@ -778,11 +924,29 @@ After upgrading, run 'archon setup' again.`,
     }
   }
 
-  if (!hasClaude && !hasCodex) {
+  if (hasHermes && !isCommandAvailable('hermes')) {
+    note(CLI_INSTALL_INSTRUCTIONS.hermes.instructions, 'Hermes Agent Not Found');
+    const continueWithoutHermes = await confirm({
+      message: 'Continue setup without Hermes?',
+      initialValue: false,
+    });
+    if (isCancel(continueWithoutHermes)) {
+      cancel('Setup cancelled.');
+      process.exit(0);
+    }
+    if (!continueWithoutHermes) {
+      cancel('Please install Hermes Agent and run setup again.');
+      process.exit(0);
+    }
+    hasHermes = false;
+  }
+
+  if (!hasClaude && !hasCodex && !hasHermes) {
     log.warning('No AI assistant selected. You can add one later by running `archon setup` again.');
     return {
       claude: false,
       codex: false,
+      hermes: false,
       defaultAssistant: getRegisteredProviders().find(p => p.builtIn)?.id ?? 'claude',
     };
   }
@@ -808,6 +972,19 @@ After upgrading, run 'archon setup' again.`,
     codexTokens = tokens ?? undefined;
   }
 
+  let hermesModel: string | undefined;
+  let hermesProvider: string | undefined;
+  let hermesEndpoint: string | undefined;
+  let hermesBinaryPath: string | undefined;
+
+  if (hasHermes) {
+    const hermesConfig = await collectHermesConfig();
+    hermesModel = hermesConfig.model;
+    hermesProvider = hermesConfig.provider;
+    hermesEndpoint = hermesConfig.endpoint;
+    hermesBinaryPath = hermesConfig.hermesBinaryPath;
+  }
+
   // Determine default assistant — use the registry, but keep setup/auth flows built-in only.
   // Default to first registered built-in provider rather than hardcoding 'claude'.
   let defaultAssistant = getRegisteredProviders().find(p => p.builtIn)?.id ?? 'claude';
@@ -831,6 +1008,8 @@ After upgrading, run 'archon setup' again.`,
     }
 
     defaultAssistant = defaultChoice;
+  } else if (hasHermes && !hasClaude && !hasCodex) {
+    defaultAssistant = 'hermes';
   } else if (hasCodex && !hasClaude) {
     defaultAssistant = 'codex';
   }
@@ -843,6 +1022,11 @@ After upgrading, run 'archon setup' again.`,
     ...(claudeBinaryPath !== undefined ? { claudeBinaryPath } : {}),
     codex: hasCodex,
     codexTokens,
+    hermes: hasHermes,
+    hermesModel,
+    hermesProvider,
+    hermesEndpoint,
+    hermesBinaryPath,
     defaultAssistant,
   };
 }
@@ -1226,6 +1410,24 @@ export function generateEnvContent(config: SetupConfig): string {
     lines.push(`CODEX_ACCESS_TOKEN=${config.ai.codexTokens.accessToken}`);
     lines.push(`CODEX_REFRESH_TOKEN=${config.ai.codexTokens.refreshToken}`);
     lines.push(`CODEX_ACCOUNT_ID=${config.ai.codexTokens.accountId}`);
+    lines.push('');
+  }
+
+  // Hermes
+  if (config.ai.hermes) {
+    lines.push('# Hermes Agent');
+    if (config.ai.hermesModel) {
+      lines.push(`HERMES_MODEL=${config.ai.hermesModel}`);
+    }
+    if (config.ai.hermesProvider) {
+      lines.push(`HERMES_PROVIDER=${config.ai.hermesProvider}`);
+    }
+    if (config.ai.hermesEndpoint) {
+      lines.push(`HERMES_ENDPOINT=${config.ai.hermesEndpoint}`);
+    }
+    if (config.ai.hermesBinaryPath) {
+      lines.push(`HERMES_BINARY_PATH=${config.ai.hermesBinaryPath}`);
+    }
     lines.push('');
   }
 
@@ -1677,6 +1879,7 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
     const summary = [
       `Claude: ${existing.hasClaude ? 'Configured' : 'Not configured'}`,
       `Codex: ${existing.hasCodex ? 'Configured' : 'Not configured'}`,
+      `Hermes: ${existing.hasHermes ? 'Configured' : 'Not configured'}`,
       `Platforms: ${configuredPlatforms.length > 0 ? configuredPlatforms.join(', ') : 'None'}`,
     ].join('\n');
 
@@ -1713,6 +1916,7 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
       ai: {
         claude: existing?.hasClaude ?? false,
         codex: existing?.hasCodex ?? false,
+        hermes: existing?.hasHermes ?? false,
         defaultAssistant: getRegisteredProviders().find(p => p.builtIn)?.id ?? 'claude',
       },
       platforms: {
@@ -1908,6 +2112,12 @@ export async function setupCommand(options: SetupOptions): Promise<void> {
   }
   if (config.ai.codex && config.ai.codexTokens) {
     aiConfigured.push('Codex');
+  }
+  if (config.ai.hermes) {
+    const parts: string[] = ['Hermes'];
+    if (config.ai.hermesProvider) parts.push(config.ai.hermesProvider);
+    if (config.ai.hermesModel) parts.push(config.ai.hermesModel);
+    aiConfigured.push(parts.join(' — '));
   }
 
   const summaryLines = [

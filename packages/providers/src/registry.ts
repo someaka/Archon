@@ -18,6 +18,7 @@ import { CodexProvider } from './codex/provider';
 import { CLAUDE_CAPABILITIES } from './claude/capabilities';
 import { CODEX_CAPABILITIES } from './codex/capabilities';
 import { registerPiProvider } from './community/pi/registration';
+import { registerHermesProvider } from './hermes/registration';
 import { UnknownProviderError } from './errors';
 import { createLogger } from '@archon/paths';
 
@@ -102,7 +103,7 @@ export function isRegisteredProvider(id: string): boolean {
 }
 
 /**
- * Register built-in providers (Claude, Codex). Idempotent — skips already-registered IDs.
+ * Register built-in providers (Claude, Codex, Hermes). Idempotent — skips already-registered IDs.
  * Must be called at process entrypoints (server, CLI) before any provider lookups.
  */
 export function registerBuiltinProviders(): void {
@@ -129,6 +130,9 @@ export function registerBuiltinProviders(): void {
       getLog().debug({ provider: entry.id }, 'builtin_provider.registered');
     }
   }
+
+  // Register Hermes
+  registerHermesProvider();
 }
 
 /**

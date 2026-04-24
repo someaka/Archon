@@ -11,6 +11,7 @@ export type {
   ProviderInfo,
   MessageChunk,
   TokenUsage,
+  HermesProviderDefaults,
 } from './types';
 
 // Provider config types (canonical definitions in ./types, re-exported via config modules)
@@ -53,3 +54,20 @@ export {
   registerPiProvider,
   type PiProviderDefaults,
 } from './community/pi';
+
+// Hermes Agent provider
+export { HermesProvider } from './hermes/provider';
+export { registerHermesProvider } from './hermes/registration';
+export { HERMES_CAPABILITIES } from './hermes/capabilities';
+export { parseHermesConfig } from './hermes/config';
+export { parseHermesModelRef, isHermesModelCompatible } from './hermes/model-ref';
+export {
+  resolveHermesModel,
+  resolveHermesProvider,
+  resolveHermesEndpoint,
+  buildHermesCliArgs,
+} from './hermes/options-translator';
+export { bridgeHermesSession, AsyncQueue } from './hermes/event-bridge';
+export { resolveHermesBinary } from './hermes/binary-resolver';
+export { resolveHermesSession } from './hermes/session-resolver';
+export type { HermesModelRef } from './hermes/model-ref';
