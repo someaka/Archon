@@ -8,4 +8,3 @@ nodes:
 
       $USER_MESSAGE
     provider: hermes
-    model: qwen2.5-coder:32b
