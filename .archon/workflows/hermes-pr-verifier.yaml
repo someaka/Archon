@@ -1,0 +1,336 @@
+name: hermes-pr-verifier
+description: |
+  Use when: Verify a PR or working-tree changes with adversarial quality gates via Hermes.
+  Triggers: "verify PR", "verify this", "hermes verify", "adversarial review",
+            "check this PR", "validate PR with hermes"
+  Does: Scopes the changes → runs 3 parallel Hermes review agents (code quality,
+        security, protocol compliance) → runs 3 validation gates (type-check, lint, test)
+        → adversarial evaluator scores every finding with hard 7/10 pass threshold →
+        verdict agent delivers final decision with ranked issues.
+  NOT for: Simple questions, CI status alone, PR creation, general exploration.
+
+  Inspired by archon-adversarial-dev (GAN-style evaluator with hard scoring),
+  archon-comprehensive-pr-review (parallel specialized agents), and
+  archon-validate-pr (validation gates + final verdict).
+
+provider: hermes
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: SCOPE
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: scope
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(pwd)"
+      echo "$WORKDIR" > "$ARTIFACTS_DIR/.workdir"
+
+      echo "=== Working Tree Status ==="
+      git status --short
+
+      echo ""
+      echo "=== Changed Files ==="
+      git diff --name-only HEAD
+
+      echo ""
+      echo "=== Diff Stats ==="
+      git diff --stat HEAD
+
+      echo ""
+      echo "=== Issue Context ==="
+      if [ -n "$ARGUMENTS" ]; then
+        echo "$ARGUMENTS"
+      else
+        echo "(no issue description provided — verifying working tree changes)"
+      fi
+
+      echo ""
+      echo "=== Git Log (last 3 commits) ==="
+      git log --oneline -3
+
+      echo ""
+      echo "=== Package Info ==="
+      if [ -f "package.json" ]; then
+        grep -E '"name"|"version"|"scripts"' package.json | head -6
+      fi
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: PARALLEL REVIEW (3 Hermes agents, inspired by
+  #           archon-comprehensive-pr-review's 5-agent fan-out)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: code-review
+    prompt: |
+      You are a code-quality reviewer. Your mandate is to find BUGS, logic errors,
+      race conditions, type violations, and structural issues.
+
+      ## Scope
+      $scope.output
+
+      ## Instructions
+
+      1. Read EVERY changed file in the diff. Do not skim.
+      2. For each file, look for:
+         - Logic errors (wrong conditions, inverted booleans, off-by-one)
+         - Race conditions (async without await, missing error handling, shared mutable state)
+         - Type violations (unsafe casts, `any` usage, incorrect type narrowing)
+         - Control flow issues (unreachable code, infinite loops, swallowed errors)
+         - Resource leaks (unclosed handles, missing cleanup, memory issues)
+      3. Assign each finding a SEVERITY: CRITICAL, HIGH, MEDIUM, or LOW.
+      4. Include exact file paths and line numbers.
+      5. Suggest a concrete fix for each finding.
+
+      Output your review as a structured report with headings per file.
+    depends_on: [scope]
+    context: fresh
+
+  - id: security-scan
+    prompt: |
+      You are a security auditor. Your mandate is to find vulnerabilities,
+      unsafe patterns, and security anti-patterns.
+
+      ## Scope
+      $scope.output
+
+      ## Instructions
+
+      1. Read EVERY changed file in the diff.
+      2. Look for:
+         - Injection vectors (unsanitized input in shell commands, SQL, eval)
+         - Credential leaks (API keys, tokens in logs, env vars exposed to subprocesses)
+         - Path traversal (unsanitized file paths, '../' concatenation)
+         - Insecure defaults (debug mode in production, permissive CORS)
+         - Missing input validation (user input passed to system APIs without checks)
+         - Permission issues (reading/writing files without proper path validation)
+      3. Assign each finding a SEVERITY: CRITICAL, HIGH, MEDIUM, or LOW.
+      4. Include exact file paths and line numbers.
+      5. Suggest a concrete fix for each finding.
+
+      Output your review as a structured report.
+    depends_on: [scope]
+    context: fresh
+
+  - id: protocol-check
+    prompt: |
+      You are a protocol compliance auditor. Your mandate is to verify that
+      communication protocols, API contracts, and data formats are correctly
+      implemented.
+
+      ## Scope
+      $scope.output
+
+      ## Instructions
+
+      1. Read EVERY changed file in the diff.
+      2. Check for:
+         - JSON-RPC 2.0 compliance (correct jsonrpc field, id handling, error codes)
+         - API contract mismatches (wrong field names, missing required fields, wrong types)
+         - Serialization issues (incorrect JSON structure, missing newlines in NDJSON)
+         - Protocol lifecycle errors (initialization before use, cleanup after use)
+         - Race conditions in request/response matching (wrong id routing, duplicate ids)
+         - Notification vs request confusion (sending requests where notifications belong)
+      3. Assign each finding a SEVERITY: CRITICAL, HIGH, MEDIUM, or LOW.
+      4. Include exact file paths and line numbers.
+      5. Suggest a concrete fix for each finding.
+
+      Output your review as a structured report.
+    depends_on: [scope]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: VALIDATION GATES (deterministic, parallel)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: type-check
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== TypeScript Type Check ==="
+      if bun run type-check 2>&1; then
+        echo "PASS: type-check"
+        exit 0
+      else
+        echo "FAIL: type-check"
+        exit 0  # Don't fail the workflow — let the evaluator decide
+      fi
+    depends_on: [scope]
+    timeout: 120000
+
+  - id: lint-check
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== ESLint ==="
+      if bun run lint --max-warnings 0 2>&1; then
+        echo "PASS: lint"
+        exit 0
+      else
+        echo "FAIL: lint"
+        exit 0
+      fi
+    depends_on: [scope]
+    timeout: 120000
+
+  - id: test-gates
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== Hermes Provider Tests ==="
+      if bun test packages/providers/src/hermes/ 2>&1; then
+        echo "PASS: hermes provider tests"
+      else
+        echo "FAIL: hermes provider tests (or no tests found)"
+      fi
+
+      echo ""
+      echo "=== Full Test Suite ==="
+      if bun run test 2>&1; then
+        echo "PASS: full test suite"
+        exit 0
+      else
+        echo "FAIL: full test suite"
+        exit 0
+      fi
+    depends_on: [scope]
+    timeout: 300000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: ADVERSARIAL EVALUATION
+  #           Inspired by archon-adversarial-dev's Evaluator role
+  #           — hard scoring with 7/10 pass threshold, no benefit of doubt
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: evaluate
+    prompt: |
+      You are an ADVERSARIAL EVALUATOR. Your mandate is to judge the code changes
+      against every finding from the review agents and every validation gate result.
+      You are NOT helpful. You are NOT generous. You are an attacker looking for
+      reasons to FAIL this PR.
+
+      ## Review Findings
+
+      ### Code Review
+      $code-review.output
+
+      ### Security Scan
+      $security-scan.output
+
+      ### Protocol Compliance
+      $protocol-check.output
+
+      ## Validation Gate Results
+
+      ### Type Check
+      $type-check.output
+
+      ### Lint Check
+      $lint-check.output
+
+      ### Test Gates
+      $test-gates.output
+
+      ## Scoring Rules
+
+      Score every distinct finding on a 1-10 scale:
+
+      **9-10**: CRITICAL. Ship-blocker. This WILL cause crashes, data loss,
+               security breaches, or protocol failures in production.
+      **7-8**: HIGH. Significant bug or vulnerability. Must fix before merge.
+      **5-6**: MEDIUM. Code smell or potential issue. Should fix.
+      **3-4**: LOW. Minor style issue or nitpick. Nice to fix.
+      **1-2**: INFO. Trivial observation. Can ignore.
+
+      ## Thresholds
+
+      - If ANY finding scores ≥ 9: **FAIL** (ship-blocker present)
+      - If more than 3 findings score ≥ 7: **FAIL** (too many high-severity issues)
+      - If any validation gate FAILED: deduct 2 points from the overall score
+      - Overall score = 10 - (sum of CRITICAL findings × 3) - (HIGH findings × 1)
+      - Minimum overall score to pass: **7**
+
+      ## Output
+
+      Produce a structured verdict:
+
+      ```json
+      {
+        "verdict": "PASS" or "FAIL",
+        "overallScore": <0-10>,
+        "findings": [
+          {
+            "id": "F-001",
+            "source": "code-review" | "security-scan" | "protocol-check" | "gates",
+            "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+            "score": <1-10>,
+            "description": "One-line summary",
+            "file": "path/to/file.ts",
+            "line": <number>,
+            "fix": "Concrete fix instruction"
+          }
+        ],
+        "gateResults": {
+          "typeCheck": "PASS" | "FAIL",
+          "lint": "PASS" | "FAIL",
+          "tests": "PASS" | "FAIL"
+        },
+        "summary": "One paragraph explaining the verdict and key issues."
+      }
+      ```
+
+      Be brutal. Do not give benefit of the doubt. A score of 7 means
+      "genuinely meets the bar, no shortcuts." If code is broken, say it's broken.
+
+      Write the verdict JSON to: `$ARTIFACTS_DIR/verdict.json`
+      Use the Write tool.
+    depends_on: [code-review, security-scan, protocol-check, type-check, lint-check, test-gates]
+    trigger_rule: all_done
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: VERDICT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: verdict
+    prompt: |
+      You are the final verdict agent. Read the evaluator's verdict and deliver
+      a clear, actionable report to the user.
+
+      ## Evaluator Verdict
+      $evaluate.output
+
+      Also read `$ARTIFACTS_DIR/verdict.json` for the structured verdict.
+
+      ## Instructions
+
+      1. Announce the verdict clearly: **PASS** or **FAIL**
+      2. Show the overall score (e.g., "Overall: 8/10 — PASS")
+      3. List CRITICAL findings first (if any), then HIGH, then MEDIUM
+      4. For each finding, include:
+         - The issue description
+         - File and line number
+         - The concrete fix instruction from the evaluator
+      5. Show validation gate results (type-check, lint, tests)
+      6. If FAIL: state EXACTLY what must be fixed to pass
+      7. If PASS: note any MEDIUM/LOW findings that could be improved
+
+      Format as a clean, scannable report. Use headers, bullet points, and code
+      blocks for fix instructions.
+
+      Output the report directly so the user sees it.
+    depends_on: [evaluate]
+    context: fresh
