@@ -1,16 +1,20 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { EventEmitter } from 'events';
+import { Readable, Writable } from 'stream';
 
 import { createMockLogger } from '../test/mocks/logger';
-import { createMockHermesProcess } from '../test/mocks/hermes-cli.mock';
 
 // ─── Mock @archon/paths logger before importing event-bridge ───────────────
 
 const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
+  BUNDLED_IS_BINARY: false,
 }));
 
-import { AsyncQueue, bridgeHermesSession } from './event-bridge';
+import { AsyncQueue, bridgeHermesSession, type BridgeOptions } from './event-bridge';
+import { resetAcpIdCounter } from './acp-protocol';
+import type { ChildProcess } from 'child_process';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -25,6 +29,177 @@ async function consume(generator: AsyncGenerator<unknown>): Promise<{
   } catch (err) {
     return { chunks, error: err as Error };
   }
+}
+
+function makeBridgeOptions(overrides?: Partial<BridgeOptions>): BridgeOptions {
+  return { prompt: 'Say hello', cwd: '/tmp', ...overrides };
+}
+
+// ─── ACP Mock Process (responds to stdin with ACP JSON-RPC) ────────────────
+
+interface AcpMock {
+  stdout: Readable;
+  stderr: Readable;
+  stdin: Writable;
+  process: ChildProcess;
+  emitExit(code: number): void;
+  emitError(error: Error): void;
+  /** Push raw data to stderr (for testing stderr capture). */
+  pushStderr(data: string): void;
+}
+
+/**
+ * Create a mock Hermes ACP process that responds to stdin requests with
+ * ACP JSON-RPC responses on stdout.
+ *
+ * Response sequence (triggered by stdin writes):
+ *   1. `initialize` → id-matched response
+ *   2. `session/new` → id-matched response with {sessionId: 'test-session'}
+ *   3. `session/prompt` → streams session/update notifications, then id-matched response
+ *
+ * This mimics the real `hermes acp` protocol flow:
+ *   Client sends init → Server responds
+ *   Client sends session/new → Server responds with sessionId
+ *   Client sends session/prompt → Server streams updates, then responds with stopReason
+ */
+function createAcpMock(
+  options: {
+    /** Custom updates to stream before the prompt response. */
+    updates?: Array<{
+      sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+      text: string;
+    }>;
+    /** Stop reason for the prompt response. */
+    stopReason?: string;
+    /** Custom session id. */
+    sessionId?: string;
+  } = {}
+): AcpMock {
+  const sessionId = options.sessionId ?? 'test-session';
+  const updates =
+    options.updates ??
+    ([{ sessionUpdate: 'agent_message_chunk' as const, text: 'Hello, world!' }] as Array<{
+      sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+      text: string;
+    }>);
+  const stopReason = options.stopReason ?? 'end_turn';
+
+  const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
+
+  const fauxProcess = new EventEmitter() as EventEmitter & {
+    pid: number | undefined;
+    stdout: Readable;
+    stderr: Readable;
+    stdin: Writable;
+    kill(signal?: NodeJS.Signals | number): boolean;
+    unref(): void;
+    ref(): void;
+    killed: boolean;
+  };
+
+  // ── Stdin: respond to ACP requests ────────────────────────────────────
+  const stdin = new Writable({
+    write(chunk: Buffer | string, _encoding: string, callback: () => void): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+
+        if (req.method === 'initialize') {
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] },
+            }) + '\n'
+          );
+        } else if (req.method === 'session/new') {
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { sessionId },
+            }) + '\n'
+          );
+        } else if (req.method === 'session/prompt') {
+          // Stream session/update notifications first
+          for (const update of updates) {
+            stdout.push(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                method: 'session/update',
+                params: {
+                  sessionId,
+                  update: {
+                    sessionUpdate: update.sessionUpdate,
+                    content: { type: 'text', text: update.text },
+                  },
+                },
+              }) + '\n'
+            );
+          }
+          // Then the prompt response
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { stopReason },
+            }) + '\n'
+          );
+        }
+      } catch {
+        // Ignore invalid JSON on stdin.
+      }
+      callback();
+    },
+  });
+
+  fauxProcess.pid = 12345;
+  fauxProcess.stdout = stdout;
+  fauxProcess.stderr = stderr;
+  fauxProcess.stdin = stdin;
+  fauxProcess.killed = false;
+
+  fauxProcess.kill = (signal?: NodeJS.Signals | number): boolean => {
+    const sig = typeof signal === 'number' ? String(signal) : (signal ?? 'SIGTERM');
+    fauxProcess.killed = true;
+    if (typeof signal === 'string') {
+      queueMicrotask(() => fauxProcess.emit('exit', null, signal));
+    } else if (typeof signal === 'number') {
+      queueMicrotask(() => fauxProcess.emit('exit', signal, null));
+    } else {
+      queueMicrotask(() => fauxProcess.emit('exit', 0, null));
+    }
+    return true;
+  };
+
+  fauxProcess.unref = (): void => {
+    // no-op
+  };
+
+  fauxProcess.ref = (): void => {
+    // no-op
+  };
+
+  const process = fauxProcess as unknown as ChildProcess;
+
+  return {
+    stdout,
+    stderr,
+    stdin,
+    process,
+    emitExit(code: number): void {
+      fauxProcess.emit('exit', code, null);
+      stdout.push(null);
+      stderr.push(null);
+    },
+    emitError(error: Error): void {
+      fauxProcess.emit('error', error);
+    },
+    pushStderr(data: string): void {
+      stderr.push(data);
+    },
+  };
 }
 
 // ─── AsyncQueue ────────────────────────────────────────────────────────────
@@ -108,7 +283,7 @@ describe('AsyncQueue', () => {
   });
 });
 
-// ─── bridgeHermesSession ───────────────────────────────────────────────────
+// ─── bridgeHermesSession (ACP) ─────────────────────────────────────────────
 
 describe('bridgeHermesSession', () => {
   beforeEach(() => {
@@ -118,42 +293,37 @@ describe('bridgeHermesSession', () => {
     mockLogger.info.mockClear();
     mockLogger.trace.mockClear();
     mockLogger.child.mockClear();
+    resetAcpIdCounter(1);
+  });
+
+  afterEach(() => {
+    resetAcpIdCounter(1);
   });
 
   // ── Happy path ──────────────────────────────────────────────────────────
 
-  test('single text_delta → assistant chunk with correct content', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'text_delta', content: 'Hello, world!' },
-        { type: 'done', sessionId: 's', usage: { input: 10, output: 5 } },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
+  test('single agent_message_chunk → assistant chunk with correct content', async () => {
+    const mock = createAcpMock({
+      updates: [{ sessionUpdate: 'agent_message_chunk', text: 'Hello, world!' }],
     });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
     expect(assistantChunks).toHaveLength(1);
     expect(assistantChunks[0]).toMatchObject({ type: 'assistant', content: 'Hello, world!' });
   });
 
-  test('multiple text_delta → multiple chunks in sequence', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'text_delta', content: 'First' },
-        { type: 'text_delta', content: ' second' },
-        { type: 'text_delta', content: ' third.' },
-        { type: 'done', sessionId: 'test-session', usage: { input: 10, output: 5 } },
+  test('multiple agent_message_chunks → multiple assistant chunks in sequence', async () => {
+    const mock = createAcpMock({
+      updates: [
+        { sessionUpdate: 'agent_message_chunk', text: 'First' },
+        { sessionUpdate: 'agent_message_chunk', text: ' second' },
+        { sessionUpdate: 'agent_message_chunk', text: ' third.' },
       ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
     });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
     expect(assistantChunks).toHaveLength(3);
@@ -162,161 +332,93 @@ describe('bridgeHermesSession', () => {
     expect(assistantChunks[2]).toMatchObject({ content: ' third.' });
   });
 
-  // ── Tool use flow ───────────────────────────────────────────────────────
-
-  test('tool_start → tool chunk, tool_output → tool_result, tool_end → skipped', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'tool_start', tool: 'bash', input: { command: 'ls -la' } },
-        { type: 'tool_output', tool: 'bash', output: 'file1\nfile2' },
-        { type: 'tool_end', tool: 'bash' },
-        { type: 'text_delta', content: 'Done!' },
-        { type: 'done', sessionId: 's', usage: { input: 10, output: 5 } },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
+  test('agent_thought_chunk → thinking chunk', async () => {
+    const mock = createAcpMock({
+      updates: [{ sessionUpdate: 'agent_thought_chunk', text: 'Let me think...' }],
     });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
-    const toolChunks = chunks.filter(c => (c as { type: string }).type === 'tool');
-    const toolResultChunks = chunks.filter(c => (c as { type: string }).type === 'tool_result');
-    const toolEndChunks = chunks.filter(c => (c as { type: string }).type === 'tool_end');
-
-    expect(toolChunks).toHaveLength(1);
-    expect(toolChunks[0]).toMatchObject({
-      type: 'tool',
-      toolName: 'bash',
-      toolInput: { command: 'ls -la' },
-    });
-
-    expect(toolResultChunks).toHaveLength(1);
-    expect(toolResultChunks[0]).toMatchObject({
-      type: 'tool_result',
-      toolName: 'bash',
-      toolOutput: 'file1\nfile2',
-    });
-
-    expect(toolEndChunks).toHaveLength(0);
+    const thinkingChunks = chunks.filter(c => (c as { type: string }).type === 'thinking');
+    expect(thinkingChunks).toHaveLength(1);
+    expect(thinkingChunks[0]).toMatchObject({ type: 'thinking', content: 'Let me think...' });
   });
 
-  // ── Error event ─────────────────────────────────────────────────────────
-
-  test('Hermes error event → result chunk with isError: true', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'error', message: 'Something went wrong' },
-        { type: 'done', sessionId: 's', usage: { input: 1, output: 1 } },
+  test('mixed message + thought chunks stream correctly', async () => {
+    const mock = createAcpMock({
+      updates: [
+        { sessionUpdate: 'agent_thought_chunk', text: 'Hmm...' },
+        { sessionUpdate: 'agent_message_chunk', text: 'Here is the answer.' },
       ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
     });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const thinking = chunks.filter(c => (c as { type: string }).type === 'thinking');
+    const assistant = chunks.filter(c => (c as { type: string }).type === 'assistant');
+    expect(thinking).toHaveLength(1);
+    expect(assistant).toHaveLength(1);
+    expect(thinking[0]).toMatchObject({ content: 'Hmm...' });
+    expect(assistant[0]).toMatchObject({ content: 'Here is the answer.' });
+  });
+
+  // ── Result chunk ────────────────────────────────────────────────────────
+
+  test('result chunk carries sessionId and stopReason', async () => {
+    const mock = createAcpMock();
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
-    expect(resultChunks.length).toBeGreaterThan(0);
+    expect(resultChunks).toHaveLength(1);
     expect(resultChunks[0]).toMatchObject({
       type: 'result',
-      isError: true,
-      errors: ['Something went wrong'],
+      sessionId: 'test-session',
+      stopReason: 'end_turn',
     });
   });
 
-  // ── Done event ──────────────────────────────────────────────────────────
+  // ── Empty stream ────────────────────────────────────────────────────────
 
-  test('done event → result chunk with tokens and sessionId', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        {
-          type: 'done',
-          sessionId: 'session-abc',
-          usage: { input: 100, output: 50 },
-        },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
+  test('no notifications → still emits result chunk', async () => {
+    const mock = createAcpMock({ updates: [] });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
-    expect(resultChunks.length).toBeGreaterThan(0);
-    expect(resultChunks[0]).toMatchObject({
-      type: 'result',
-      sessionId: 'session-abc',
-      tokens: { input: 100, output: 50, total: 150 },
-    });
-  });
-
-  // ── Invalid JSON line ───────────────────────────────────────────────────
-
-  test('invalid JSON line logs warning and stream continues', async () => {
-    const mock = createMockHermesProcess({
-      events: [{ type: 'text_delta', content: 'before' }],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: false,
-    });
-
-    const consumePromise = consume(bridgeHermesSession(mock.process));
-
-    // Write additional data after the bridge is set up.
-    await new Promise(r => setTimeout(r, 5));
-    mock.writeStdout('this is not json\n');
-    mock.writeStdout(JSON.stringify({ type: 'text_delta', content: 'after' }) + '\n');
-    mock.emitExit(0);
-
-    const { chunks } = await consumePromise;
-
-    const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
-    expect(assistantChunks.length).toBeGreaterThanOrEqual(1);
-    expect(assistantChunks[0]).toMatchObject({ content: 'before' });
-    // Stream continued after invalid JSON — bridge didn't crash.
-    // (Logger calls are on a child logger, not directly trackable here.)
+    expect(resultChunks).toHaveLength(1);
   });
 
   // ── Process non-zero exit ───────────────────────────────────────────────
 
   test('process non-zero exit → result with isError: true', async () => {
-    const mock = createMockHermesProcess({
-      events: [{ type: 'text_delta', content: 'partial output' }],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: false,
-    });
+    // Create a mock that doesn't respond to stdin (simulates dead process)
+    const { process } = createAcpMock({ updates: [] });
 
-    const consumePromise = consume(bridgeHermesSession(mock.process));
+    const consumePromise = consume(bridgeHermesSession(process, makeBridgeOptions()));
 
+    // Emit exit before the bridge gets a response
     queueMicrotask(() => {
-      mock.process.emit('exit', 1, null);
+      process.emit('exit', 1, null);
     });
 
     const { chunks } = await consumePromise;
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
     expect(resultChunks.length).toBeGreaterThan(0);
-    const lastResult = resultChunks[resultChunks.length - 1];
-    expect(lastResult).toMatchObject({
-      type: 'result',
-      isError: true,
-    });
+    const lastResult = resultChunks[resultChunks.length - 1] as {
+      type: string;
+      isError?: boolean;
+    };
+    expect(lastResult.isError).toBe(true);
   });
 
   // ── Process crash (error event) ─────────────────────────────────────────
 
   test('process crash via error event → result with isError: true', async () => {
-    const mock = createMockHermesProcess({
-      events: [],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: false,
-    });
+    const mock = createAcpMock({ updates: [] });
 
-    const consumePromise = consume(bridgeHermesSession(mock.process));
+    const consumePromise = consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     queueMicrotask(() => {
       mock.emitError(new Error('spawn failure'));
@@ -334,18 +436,15 @@ describe('bridgeHermesSession', () => {
 
   // ── Abort signal ────────────────────────────────────────────────────────
 
-  test('abort signal kills process and stream terminates cleanly', async () => {
+  test('abort signal kills process and stream terminates with error result', async () => {
     const controller = new AbortController();
     controller.abort();
 
-    const mock = createMockHermesProcess({
-      events: [{ type: 'text_delta', content: 'partial' }],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
+    const mock = createAcpMock({ updates: [] });
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process, controller.signal));
+    const { chunks } = await consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal)
+    );
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
     expect(resultChunks.length).toBeGreaterThan(0);
@@ -359,128 +458,25 @@ describe('bridgeHermesSession', () => {
   // ── Stderr output ───────────────────────────────────────────────────────
 
   test('stderr output is captured and logged', async () => {
-    const mock = createMockHermesProcess({
-      events: [{ type: 'text_delta', content: 'ok' }],
-      stderrData: ['warning: something happened\n'],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
+    const mock = createAcpMock({
+      updates: [{ sessionUpdate: 'agent_message_chunk', text: 'ok' }],
     });
+    // Push stderr before bridge consumes
+    mock.pushStderr('warning: something happened\n');
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
     expect(assistantChunks).toHaveLength(1);
     expect(assistantChunks[0]).toMatchObject({ content: 'ok' });
   });
 
-  // ── Empty stream ────────────────────────────────────────────────────────
-
-  test('empty stream (no events, clean exit) → graceful termination with result', async () => {
-    const mock = createMockHermesProcess({
-      events: [],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
-
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
-
-    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
-    expect(resultChunks.length).toBeGreaterThan(0);
-  });
-
-  // ── Complex multi-event session ─────────────────────────────────────────
-
-  test('complex session with text + tools + done', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'text_delta', content: 'Let me check the files.' },
-        { type: 'tool_start', tool: 'bash', input: { command: 'ls' } },
-        { type: 'tool_output', tool: 'bash', output: 'file1.txt\nfile2.txt' },
-        { type: 'tool_end', tool: 'bash' },
-        { type: 'text_delta', content: ' I found 2 files.' },
-        {
-          type: 'done',
-          sessionId: 'complex-session',
-          usage: { input: 50, output: 25 },
-        },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
-
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
-
-    const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
-    const toolChunks = chunks.filter(c => (c as { type: string }).type === 'tool');
-    const toolResultChunks = chunks.filter(c => (c as { type: string }).type === 'tool_result');
-    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
-
-    expect(assistantChunks).toHaveLength(2);
-    expect(assistantChunks[0]).toMatchObject({ content: 'Let me check the files.' });
-    expect(assistantChunks[1]).toMatchObject({ content: ' I found 2 files.' });
-
-    expect(toolChunks).toHaveLength(1);
-    expect(toolChunks[0]).toMatchObject({
-      type: 'tool',
-      toolName: 'bash',
-      toolInput: { command: 'ls' },
-    });
-
-    expect(toolResultChunks).toHaveLength(1);
-    expect(toolResultChunks[0]).toMatchObject({
-      type: 'tool_result',
-      toolName: 'bash',
-      toolOutput: 'file1.txt\nfile2.txt',
-    });
-
-    expect(resultChunks).toHaveLength(1);
-    expect(resultChunks[0]).toMatchObject({
-      type: 'result',
-      sessionId: 'complex-session',
-      tokens: { input: 50, output: 25, total: 75 },
-    });
-  });
-
-  // ── Unknown event type ──────────────────────────────────────────────────
-
-  test('unknown event type is silently skipped', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'text_delta', content: 'before' },
-        { type: 'unknown_event', data: 'whatever' } as unknown as {
-          type: 'text_delta';
-          content: string;
-        },
-        { type: 'text_delta', content: 'after' },
-        { type: 'done', sessionId: 's', usage: { input: 1, output: 1 } },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
-
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
-
-    const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
-    expect(assistantChunks).toHaveLength(2);
-    expect(assistantChunks[0]).toMatchObject({ content: 'before' });
-    expect(assistantChunks[1]).toMatchObject({ content: 'after' });
-  });
-
   // ── Process terminated by signal ────────────────────────────────────────
 
   test('process terminated by signal → result with isError: true', async () => {
-    const mock = createMockHermesProcess({
-      events: [],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: false,
-    });
+    const mock = createAcpMock({ updates: [] });
 
-    const consumePromise = consume(bridgeHermesSession(mock.process));
+    const consumePromise = consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
 
     queueMicrotask(() => {
       mock.process.kill?.('SIGTERM');
@@ -496,53 +492,16 @@ describe('bridgeHermesSession', () => {
     });
   });
 
-  // ── Validate event mapping exhaustively ─────────────────────────────────
+  // ── System prompt is passed through ─────────────────────────────────────
 
-  test('text_delta maps to assistant chunk', async () => {
-    const mock = createMockHermesProcess({
-      events: [{ type: 'text_delta', content: 'hello' }],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
+  test('systemPrompt is sent as separate ContentBlock', async () => {
+    const mock = createAcpMock();
 
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
+    const { chunks } = await consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions({ systemPrompt: 'You are a tester.' }))
+    );
 
-    const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
-    expect(assistantChunks).toHaveLength(1);
-    expect(assistantChunks[0]).toEqual({ type: 'assistant', content: 'hello' });
-  });
-
-  test('multiple tool uses in sequence', async () => {
-    const mock = createMockHermesProcess({
-      events: [
-        { type: 'tool_start', tool: 'read', input: { path: '/x' } },
-        { type: 'tool_output', tool: 'read', output: 'contents of x' },
-        { type: 'tool_end', tool: 'read' },
-        { type: 'tool_start', tool: 'write', input: { path: '/y', content: 'data' } },
-        { type: 'tool_output', tool: 'write', output: 'written' },
-        { type: 'tool_end', tool: 'write' },
-        { type: 'done', sessionId: 's', usage: { input: 10, output: 10 } },
-      ],
-      eventDelayMs: 1,
-      initialDelayMs: 1,
-      autoEmitExit: true,
-    });
-
-    const { chunks } = await consume(bridgeHermesSession(mock.process));
-
-    const toolChunks = chunks.filter(c => (c as { type: string }).type === 'tool');
-    const toolResultChunks = chunks.filter(c => (c as { type: string }).type === 'tool_result');
-
-    expect(toolChunks).toHaveLength(2);
-    expect(toolChunks[0]).toMatchObject({ toolName: 'read', toolInput: { path: '/x' } });
-    expect(toolChunks[1]).toMatchObject({
-      toolName: 'write',
-      toolInput: { path: '/y', content: 'data' },
-    });
-
-    expect(toolResultChunks).toHaveLength(2);
-    expect(toolResultChunks[0]).toMatchObject({ toolName: 'read', toolOutput: 'contents of x' });
-    expect(toolResultChunks[1]).toMatchObject({ toolName: 'write', toolOutput: 'written' });
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
   });
 });

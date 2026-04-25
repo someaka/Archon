@@ -65,7 +65,6 @@ export {
   resolveHermesModel,
   resolveHermesProvider,
   resolveHermesEndpoint,
-  buildHermesCliArgs,
 } from './hermes/options-translator';
 export { bridgeHermesSession, AsyncQueue } from './hermes/event-bridge';
 export { resolveHermesBinary } from './hermes/binary-resolver';

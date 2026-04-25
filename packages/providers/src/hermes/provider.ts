@@ -11,7 +11,6 @@ import type {
 import { HERMES_CAPABILITIES } from './capabilities';
 import { parseHermesConfig } from './config';
 import { bridgeHermesSession } from './event-bridge';
-import { buildHermesCliArgs } from './options-translator';
 import { resolveHermesBinary } from './binary-resolver';
 import { resolveHermesSession } from './session-resolver';
 
@@ -22,15 +21,15 @@ function getLog(): ReturnType<typeof createLogger> {
 }
 
 /**
- * Hermes provider — wraps the Hermes Python CLI tool (invoked via
- * `child_process.spawn`). Hermes is a Python-based AI assistant that
- * supports tool use (bash, edit, write, grep, find, ls) and session
- * management.
+ * Hermes provider — wraps the Hermes CLI tool (invoked via
+ * `child_process.spawn`). Uses the ACP (Agent Client Protocol) JSON-RPC 2.0
+ * stdio transport for structured communication.
  *
- * Each `sendQuery()` call spawns a fresh `hermes` process with `--json`
- * output mode. The {@link bridgeHermesSession} function in
- * `event-bridge.ts` bridges the newline-delimited JSON stdout stream into
- * Archon's `AsyncGenerator<MessageChunk>` contract.
+ * Each `sendQuery()` call spawns a fresh `hermes acp` process. The
+ * {@link bridgeHermesSession} function in `event-bridge.ts` handles the
+ * ACP lifecycle: `initialize` → `session/new` → `session/prompt`, with
+ * streaming `session/update` notifications bridged into Archon's
+ * `AsyncGenerator<MessageChunk>` contract.
  *
  * v1 capabilities are all false (see `capabilities.ts`): sessionResume,
  * mcp, hooks, skills, agents, toolRestrictions, structuredOutput,
@@ -59,16 +58,14 @@ export class HermesProvider implements IAgentProvider {
   }
 
   /**
-   * Send a prompt to the Hermes CLI and yield streaming response chunks.
+   * Send a prompt to Hermes via ACP and yield streaming response chunks.
    *
    * Steps:
    *  1. Parse assistant config from `options.assistantConfig`
-   *  2. Resolve session context (cwd, env, optional resumeSessionId)
-   *  3. Resolve model from `options.model` or config default
-   *  4. Build CLI arguments (prompt, model, system prompt, env)
-   *  5. Locate the `hermes` binary (config override or PATH lookup)
-   *  6. Spawn the child process with piped stdio
-   *  7. Bridge the child process output via {@link bridgeHermesSession}
+   *  2. Resolve session context (cwd, env)
+   *  3. Locate the `hermes` binary (config override or PATH lookup)
+   *  4. Spawn `hermes acp` with piped stdio
+   *  5. Bridge the ACP session via {@link bridgeHermesSession}
    *
    * Error handling: spawn failures and non-zero exits are surfaced through
    * the bridge as `result` chunks with `isError: true`. The bridge also
@@ -84,49 +81,43 @@ export class HermesProvider implements IAgentProvider {
     // 1. Parse assistant config (.archon/config.yaml assistants.hermes section).
     const config = parseHermesConfig(options?.assistantConfig ?? {});
 
-    // 2. Resolve session context (cwd, env, resume session id).
+    // 2. Resolve session context (cwd, env).
     const session = resolveHermesSession({
       cwd,
       env: options?.env,
       resumeSessionId,
     });
 
-    // 3. Resolve model: request-level (workflow node / chat) → config default.
-    const modelRef = options?.model ?? config.model;
-
-    // 4. Build CLI arguments for `hermes chat --json ...`.
-    const args = buildHermesCliArgs({
-      prompt,
-      cwd: session.cwd,
-      modelRef,
-      config,
-      systemPrompt: options?.systemPrompt,
-      env: options?.env,
-    });
-
-    // 5. Find the hermes binary. Config override wins; falls back to PATH.
+    // 3. Find the hermes binary. Config override wins; falls back to PATH.
     const hermesBinary = (await resolveHermesBinary(config.hermesBinaryPath)) ?? 'hermes';
 
     getLog().debug(
       {
         hermesBinary,
-        args: args.slice(0, -1),
         cwd: session.cwd,
-        modelRef,
+        prompt: prompt.slice(0, 200),
       },
-      'hermes.spawning_cli'
+      'hermes.spawning_acp'
     );
 
-    // 6. Spawn the child process with piped stdio.
-    const child = spawn(hermesBinary, args, {
+    // 4. Spawn `hermes acp` with piped stdio.
+    const child = spawn(hermesBinary, ['acp'], {
       cwd: session.cwd,
       env: { ...process.env, ...session.env },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
-    // 7. Bridge the session — yield all chunks from the child process.
+    // 5. Bridge the ACP session — yield all chunks from the child process.
     try {
-      yield* bridgeHermesSession(child, options?.abortSignal);
+      yield* bridgeHermesSession(
+        child,
+        {
+          prompt,
+          cwd: session.cwd,
+          systemPrompt: options?.systemPrompt,
+        },
+        options?.abortSignal
+      );
       getLog().debug('hermes.query_completed');
     } catch (err) {
       getLog().error({ err }, 'hermes.query_failed');

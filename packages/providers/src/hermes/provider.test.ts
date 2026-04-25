@@ -1,13 +1,15 @@
 import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { EventEmitter } from 'events';
+import { Readable, Writable } from 'stream';
 
 import { createMockLogger } from '../test/mocks/logger';
-import { createMockHermesProcess } from '../test/mocks/hermes-cli.mock';
 
 // ─── Mock @archon/paths logger so provider instantiation is quiet ──────────
 
 const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
+  BUNDLED_IS_BINARY: false,
 }));
 
 // ─── Mock child_process.spawn ──────────────────────────────────────────────
@@ -31,6 +33,131 @@ mock.module('./binary-resolver', () => ({
 // Import AFTER mocks are set — module resolution freezes the mocks.
 import { HermesProvider } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
+import { resetAcpIdCounter } from './acp-protocol';
+import type { ChildProcess } from 'child_process';
+
+// ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────
+
+interface AcpMock {
+  stdout: Readable;
+  stderr: Readable;
+  stdin: Writable;
+  process: ChildProcess;
+  emitExit(code: number): void;
+  emitError(error: Error): void;
+}
+
+function createAcpMock(): AcpMock {
+  const stdout = new Readable({ read() {} });
+  const stderr = new Readable({ read() {} });
+
+  const fauxProcess = new EventEmitter() as EventEmitter & {
+    pid: number | undefined;
+    stdout: Readable;
+    stderr: Readable;
+    stdin: Writable;
+    kill(signal?: NodeJS.Signals | number): boolean;
+    unref(): void;
+    ref(): void;
+    killed: boolean;
+  };
+
+  const stdin = new Writable({
+    write(chunk: Buffer | string, _encoding: string, callback: () => void): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+
+        if (req.method === 'initialize') {
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] },
+            }) + '\n'
+          );
+        } else if (req.method === 'session/new') {
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { sessionId: 'provider-test-session' },
+            }) + '\n'
+          );
+        } else if (req.method === 'session/prompt') {
+          // Stream a message chunk then respond
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: 'provider-test-session',
+                update: {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'Hello from Hermes!' },
+                },
+              },
+            }) + '\n'
+          );
+          stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              result: { stopReason: 'end_turn' },
+            }) + '\n'
+          );
+        }
+      } catch {
+        // Ignore invalid JSON.
+      }
+      callback();
+    },
+  });
+
+  fauxProcess.pid = 12345;
+  fauxProcess.stdout = stdout;
+  fauxProcess.stderr = stderr;
+  fauxProcess.stdin = stdin;
+  fauxProcess.killed = false;
+
+  fauxProcess.kill = (signal?: NodeJS.Signals | number): boolean => {
+    const sig = typeof signal === 'number' ? String(signal) : (signal ?? 'SIGTERM');
+    fauxProcess.killed = true;
+    if (typeof signal === 'string') {
+      queueMicrotask(() => fauxProcess.emit('exit', null, signal));
+    } else if (typeof signal === 'number') {
+      queueMicrotask(() => fauxProcess.emit('exit', signal, null));
+    } else {
+      queueMicrotask(() => fauxProcess.emit('exit', 0, null));
+    }
+    return true;
+  };
+
+  fauxProcess.unref = (): void => {
+    // no-op
+  };
+
+  fauxProcess.ref = (): void => {
+    // no-op
+  };
+
+  const process = fauxProcess as unknown as ChildProcess;
+
+  return {
+    stdout,
+    stderr,
+    stdin,
+    process,
+    emitExit(code: number): void {
+      fauxProcess.emit('exit', code, null);
+      stdout.push(null);
+      stderr.push(null);
+    },
+    emitError(error: Error): void {
+      fauxProcess.emit('error', error);
+    },
+  };
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -57,6 +184,7 @@ describe('HermesProvider', () => {
     mockLogger.debug.mockClear();
     mockLogger.info.mockClear();
     mockLogger.child.mockClear();
+    resetAcpIdCounter(1);
   });
 
   test('getType returns "hermes"', () => {
@@ -67,180 +195,96 @@ describe('HermesProvider', () => {
     expect(new HermesProvider().getCapabilities()).toEqual(HERMES_CAPABILITIES);
   });
 
-  test('sendQuery basic call spawns process with correct args', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
+  test('sendQuery spawns `hermes acp` with piped stdio', async () => {
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
-    const consumePromise = consume(new HermesProvider().sendQuery('Say hello', '/tmp'));
-    // Give bridge time to set up readline before writing
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(JSON.stringify({ type: 'text_delta', content: 'Hello!' }) + '\n');
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 5, output: 3 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-
-    const { chunks } = await consumePromise;
+    const { chunks } = await consume(new HermesProvider().sendQuery('Say hello', '/tmp'));
 
     expect(mockSpawn).toHaveBeenCalledTimes(1);
-    const [command, args] = mockSpawn.mock.calls[0];
+    const [command, args, spawnOpts] = mockSpawn.mock.calls[0] as [
+      string,
+      string[],
+      Record<string, unknown>,
+    ];
     expect(command).toBe('hermes');
-    expect(args).toContain('chat');
-    expect(args).toContain('--json');
-    expect(args).toContain('--prompt');
-    expect(args).toContain('Say hello');
-    expect(args).toContain('--cwd');
-    expect(args).toContain('/tmp');
+    expect(args).toEqual(['acp']);
+    expect(spawnOpts.stdio).toEqual(['pipe', 'pipe', 'pipe']);
 
-    // Should have yielded assistant chunks
+    // Should have yielded assistant chunks from the ACP mock
     const assistantChunks = chunks.filter(
       (c): c is { type: 'assistant'; content: string } =>
         typeof c === 'object' && c !== null && (c as { type?: string }).type === 'assistant'
     );
     expect(assistantChunks.length).toBeGreaterThan(0);
+    expect(assistantChunks[0]).toMatchObject({
+      type: 'assistant',
+      content: 'Hello from Hermes!',
+    });
+
+    // Should have a result chunk
+    const resultChunks = chunks.filter(
+      (c): c is { type: 'result' } =>
+        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
+    );
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).toMatchObject({
+      type: 'result',
+      sessionId: 'provider-test-session',
+      stopReason: 'end_turn',
+    });
   });
 
-  test('sendQuery with model option includes --model in args', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
+  test('sendQuery with system prompt works', async () => {
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
-    const consumePromise = consume(
-      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
-        model: 'hermes:ollama/llama3.1',
-      })
-    );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-    await consumePromise;
-
-    const [, args] = mockSpawn.mock.calls[0];
-    expect(args).toContain('--model');
-    const modelIdx = args.indexOf('--model');
-    expect(args[modelIdx + 1]).toBe('llama3.1');
-  });
-
-  test('sendQuery with systemPrompt includes --system in args', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
-
-    const consumePromise = consume(
+    const { chunks } = await consume(
       new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
         systemPrompt: 'You are a test assistant.',
       })
     );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
+
+    const resultChunks = chunks.filter(
+      (c): c is { type: 'result' } =>
+        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
     );
-    mockProc.emitExit(0);
-    await consumePromise;
-
-    const [, args] = mockSpawn.mock.calls[0];
-    expect(args).toContain('--system');
-    const systemIdx = args.indexOf('--system');
-    expect(args[systemIdx + 1]).toBe('You are a test assistant.');
-  });
-
-  test('sendQuery with assistantConfig parses and uses config', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
-
-    const consumePromise = consume(
-      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
-        assistantConfig: {
-          model: 'qwen2.5-coder:32b',
-          provider: 'ollama',
-        },
-      })
-    );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-    await consumePromise;
-
-    const [, args] = mockSpawn.mock.calls[0];
-    expect(args).toContain('--model');
-    expect(args).toContain('qwen2.5-coder:32b');
-    expect(args).toContain('--provider');
-    expect(args).toContain('ollama');
+    expect(resultChunks).toHaveLength(1);
   });
 
   test('sendQuery with abortSignal passes signal to bridge', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
-
     const controller = new AbortController();
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
     const gen = new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
       abortSignal: controller.signal,
     });
 
-    // Start consuming
-    const consumePromise = consume(gen);
+    // Start consuming and abort immediately
+    controller.abort();
+    const { chunks } = await consume(gen);
 
-    // Abort after a microtask
-    queueMicrotask(() => controller.abort());
-
-    const { chunks } = await consumePromise;
-
-    // Should still get some chunks (the abort result)
-    expect(chunks.length).toBeGreaterThan(0);
-  });
-
-  test('sendQuery error path yields result with isError: true', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
-
-    const consumePromise = consume(new HermesProvider().sendQuery('Hello', '/tmp'));
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(JSON.stringify({ type: 'error', message: 'Model not available' }) + '\n');
-    mockProc.emitExit(0);
-
-    const { chunks } = await consumePromise;
-
+    // Should get an error result
     const resultChunks = chunks.filter(
       (c): c is { type: 'result'; isError?: boolean } =>
         typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
     );
     expect(resultChunks.length).toBeGreaterThan(0);
-    const errorResult = resultChunks[0] as { type: string; isError?: boolean; errors?: string[] };
-    expect(errorResult.isError).toBe(true);
-    expect(errorResult.errors).toEqual(['Model not available']);
-  });
-
-  test('sendQuery with env includes --env flags', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
-
-    const consumePromise = consume(
-      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
-        env: { API_KEY: 'secret', DEBUG: '1' },
-      })
-    );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-    await consumePromise;
-
-    const [, args] = mockSpawn.mock.calls[0];
-    expect(args).toContain('--env');
+    expect(resultChunks[0]).toMatchObject({
+      type: 'result',
+      isError: true,
+    });
   });
 
   test('spawn failure is handled gracefully', async () => {
     mockSpawn.mockImplementationOnce(() => {
-      const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
+      const mockAcp = createAcpMock();
       // Emit error on the process (spawn failure)
       queueMicrotask(() => {
-        mockProc.emitError(new Error('spawn EACCES'));
+        mockAcp.emitError(new Error('spawn EACCES'));
       });
-      return mockProc.process;
+      return mockAcp.process;
     });
 
     const { chunks } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
@@ -257,42 +301,30 @@ describe('HermesProvider', () => {
   });
 
   test('resume session is accepted without throwing', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
-    const consumePromise = consume(
+    const { error } = await consume(
       new HermesProvider().sendQuery('Hello', '/tmp', 'some-session-id')
     );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-    const { error } = await consumePromise;
 
     // Session resume is gracefully ignored — no error thrown.
     expect(error).toBeUndefined();
   });
 
   test('sendQuery with hermesBinaryPath in assistantConfig uses custom binary', async () => {
-    const mockProc = createMockHermesProcess({ events: [], autoEmitExit: false });
-    mockSpawn.mockImplementationOnce(() => mockProc.process);
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
-    const consumePromise = consume(
+    await consume(
       new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
         assistantConfig: {
           hermesBinaryPath: '/custom/path/hermes',
         },
       })
     );
-    await new Promise(r => setTimeout(r, 5));
-    mockProc.writeStdout(
-      JSON.stringify({ type: 'done', sessionId: 's', usage: { input: 1, output: 1 } }) + '\n'
-    );
-    mockProc.emitExit(0);
-    await consumePromise;
 
-    const [command] = mockSpawn.mock.calls[0];
+    const [command] = mockSpawn.mock.calls[0] as [string, ...unknown[]];
     expect(command).toBe('/custom/path/hermes');
   });
 

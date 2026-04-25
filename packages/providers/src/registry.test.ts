@@ -315,8 +315,6 @@ describe('registry', () => {
       const reg = getRegistration('hermes');
       expect(reg.isModelCompatible('hermes')).toBe(true);
       expect(reg.isModelCompatible('hermes:ollama/llama3.1')).toBe(true);
-      expect(reg.isModelCompatible('sonnet')).toBe(false);
-      expect(reg.isModelCompatible('gpt-4')).toBe(false);
     });
   });
 

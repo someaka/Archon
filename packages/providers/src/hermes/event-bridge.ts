@@ -1,8 +1,16 @@
 import { createLogger } from '@archon/paths';
 import type { ChildProcess } from 'child_process';
-import { createInterface } from 'readline';
 
-import type { MessageChunk, TokenUsage } from '../types';
+import type { MessageChunk } from '../types';
+import {
+  createRequest,
+  parseMessage,
+  serializeMessage,
+  type ContentBlock,
+  type JsonRpcMessage,
+  type JsonRpcRequest,
+  type SessionUpdateParams,
+} from './acp-protocol';
 
 let cachedLog: ReturnType<typeof createLogger> | undefined;
 function getLog(): ReturnType<typeof createLogger> {
@@ -58,8 +66,6 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
 
   [Symbol.asyncIterator](): AsyncIterator<T> {
     if (this.consumed) {
-      // Throw synchronously at the call site (not lazily on first .next())
-      // so the stack trace points at the offending second-consumer caller.
       throw new Error(
         'AsyncQueue: a single queue can only be iterated once (single-consumer invariant). Create a new queue for each consumer.'
       );
@@ -85,234 +91,52 @@ export class AsyncQueue<T> implements AsyncIterable<T> {
   }
 }
 
-// ─── Hermes JSON Event Types ───────────────────────────────────────────────
-
-/** Discriminated union of all Hermes CLI JSON line events. */
-interface HermesTextDeltaEvent {
-  type: 'text_delta';
-  content: string;
-}
-
-interface HermesToolStartEvent {
-  type: 'tool_start';
-  tool: string;
-  input: Record<string, unknown>;
-}
-
-interface HermesToolOutputEvent {
-  type: 'tool_output';
-  tool: string;
-  output: string;
-}
-
-interface HermesToolEndEvent {
-  type: 'tool_end';
-  tool: string;
-}
-
-interface HermesErrorEvent {
-  type: 'error';
-  message: string;
-}
-
-interface HermesDoneEvent {
-  type: 'done';
-  sessionId: string;
-  usage: { input: number; output: number };
-}
-
-type HermesEvent =
-  | HermesTextDeltaEvent
-  | HermesToolStartEvent
-  | HermesToolOutputEvent
-  | HermesToolEndEvent
-  | HermesErrorEvent
-  | HermesDoneEvent;
-
 /** Internal queue payload for `bridgeHermesSession`. */
 type BridgeQueueItem =
   | { kind: 'chunk'; chunk: MessageChunk }
   | { kind: 'done' }
   | { kind: 'error'; error: Error };
 
-// ─── Event Validation ──────────────────────────────────────────────────────
+// ─── Bridge options ─────────────────────────────────────────────────────────
 
-/**
- * Narrow an unknown parsed JSON object to a HermesEvent using structural
- * validation. Returns the typed event on success, `null` when the shape
- * doesn't match any known event type.
- *
- * Defensive: all validation is type-guard style — no `any`, only `unknown`
- * with explicit property checks. This prevents malformed JSON (or future
- * Hermes event types) from crashing the bridge.
- */
-function validateHermesEvent(raw: unknown): HermesEvent | null {
-  if (raw === null || typeof raw !== 'object') return null;
-  const obj = raw as Record<string, unknown>;
-  const eventType = obj.type;
-  if (typeof eventType !== 'string') return null;
-
-  switch (eventType) {
-    case 'text_delta': {
-      if (typeof obj.content !== 'string') return null;
-      return { type: 'text_delta', content: obj.content };
-    }
-    case 'tool_start': {
-      if (typeof obj.tool !== 'string') return null;
-      if (obj.input === null || typeof obj.input !== 'object') return null;
-      return {
-        type: 'tool_start',
-        tool: obj.tool,
-        input: obj.input as Record<string, unknown>,
-      };
-    }
-    case 'tool_output': {
-      if (typeof obj.tool !== 'string') return null;
-      if (typeof obj.output !== 'string') return null;
-      return { type: 'tool_output', tool: obj.tool, output: obj.output };
-    }
-    case 'tool_end': {
-      if (typeof obj.tool !== 'string') return null;
-      return { type: 'tool_end', tool: obj.tool };
-    }
-    case 'error': {
-      if (typeof obj.message !== 'string') return null;
-      return { type: 'error', message: obj.message };
-    }
-    case 'done': {
-      if (typeof obj.sessionId !== 'string') return null;
-      if (
-        obj.usage === null ||
-        typeof obj.usage !== 'object' ||
-        typeof (obj.usage as Record<string, unknown>).input !== 'number' ||
-        typeof (obj.usage as Record<string, unknown>).output !== 'number'
-      ) {
-        return null;
-      }
-      return {
-        type: 'done',
-        sessionId: obj.sessionId,
-        usage: obj.usage as { input: number; output: number },
-      };
-    }
-    default:
-      // Unknown event type — log and skip rather than crash.
-      return null;
-  }
+/** Options passed to bridgeHermesSession for ACP request construction. */
+export interface BridgeOptions {
+  prompt: string;
+  cwd: string;
+  systemPrompt?: string;
 }
 
-// ─── Event Mapper ──────────────────────────────────────────────────────────
+// ─── bridgeHermesSession (ACP JSON-RPC 2.0) ────────────────────────────────
 
 /**
- * Pure mapper from a validated Hermes event → zero-or-more Archon
- * `MessageChunk`s.
- *
- * Mapping rules:
- *  - `text_delta`   → `{type: 'assistant', content}`
- *  - `tool_start`   → `{type: 'tool', toolName, toolInput}`
- *  - `tool_output`  → `{type: 'tool_result', toolName, toolOutput}`
- *  - `tool_end`     → skipped (tool_result already emitted on tool_output)
- *  - `error`        → `{type: 'result', isError: true, errors: [message]}`
- *  - `done`         → `{type: 'result', sessionId, tokens}`
- *
- * Events deliberately skipped:
- *  - `tool_end` — the output is already delivered via `tool_output`; the
- *    end event is a boundary marker only.
- *  - Unknown event types — logged at debug level, silently ignored.
- */
-function mapHermesEvent(event: HermesEvent): MessageChunk[] {
-  switch (event.type) {
-    case 'text_delta':
-      return [{ type: 'assistant', content: event.content }];
-    case 'tool_start':
-      return [
-        {
-          type: 'tool',
-          toolName: event.tool,
-          toolInput: event.input,
-        },
-      ];
-    case 'tool_output':
-      return [
-        {
-          type: 'tool_result',
-          toolName: event.tool,
-          toolOutput: event.output,
-        },
-      ];
-    case 'tool_end':
-      // Skipped — tool_result was already emitted on tool_output.
-      return [];
-    case 'error':
-      return [
-        {
-          type: 'result',
-          isError: true,
-          errors: [event.message],
-        },
-      ];
-    case 'done': {
-      const tokens: TokenUsage = {
-        input: event.usage.input,
-        output: event.usage.output,
-        total: event.usage.input + event.usage.output,
-      };
-      return [
-        {
-          type: 'result',
-          sessionId: event.sessionId,
-          tokens,
-        },
-      ];
-    }
-    default: {
-      // Exhaustiveness: all known HermesEvent variants are handled above.
-      const exhaustiveCheck: never = event;
-      void exhaustiveCheck;
-      return [];
-    }
-  }
-}
-
-// ─── bridgeHermesSession ───────────────────────────────────────────────────
-
-/**
- * Bridge a Hermes CLI child process (spawned with `--json`) into Archon's
+ * Bridge a Hermes ACP child process (spawned with `hermes acp`) into Archon's
  * `AsyncGenerator<MessageChunk>` contract.
  *
  * Behavior:
- *  - reads childProcess.stdout line-by-line via `readline` interface
- *  - parses each line as JSON, validates structurally, maps to MessageChunk
- *  - logs invalid JSON / unknown events at `warn` level and continues
+ *  - sends `initialize` → `session/new` → `session/prompt` sequentially
+ *    over the child's stdin
+ *  - reads childProcess.stdout line-by-line, parsing ACP JSON-RPC 2.0
+ *    newline-delimited messages
+ *  - routes responses to the pending request resolver by id
+ *  - routes `session/update` notifications to the async queue as
+ *    MessageChunk stream events (`agent_message_chunk` → assistant,
+ *    `agent_thought_chunk` → thinking)
  *  - captures stderr lines at `warn` level (non-fatal — Hermes may log
  *    diagnostics to stderr while still succeeding on stdout)
  *  - on process exit with non-zero code: emits a terminal `result` chunk
  *    with `isError: true` and the exit code in `errors`
  *  - on process crash (error event, signal termination): emits a terminal
  *    `result` chunk with `isError: true`
- *  - on `abortSignal`: sends `SIGTERM` to the child (with `SIGKILL` fallback
- *    after 5 s), closes the queue so the consumer exits
+ *  - on `abortSignal`: sends `session/cancel` notification, then
+ *    `SIGTERM` to the child (with `SIGKILL` fallback after 5 s), closes
+ *    the queue so the consumer exits
  *  - always calls `childProcess.unref()` to prevent zombie processes
  *  - always emits a terminal `result` chunk, even on error paths, so the
  *    consumer never hangs waiting for a chunk that never arrives
- *
- * Zombie-process prevention:
- *  - `childProcess.unref()` is called immediately so the event loop doesn't
- *    keep the parent alive waiting for the child
- *  - on abort, `SIGTERM` is sent first; if the child hasn't exited after
- *    5 seconds, `SIGKILL` is sent as a last resort
- *  - the `readline` interface and stream listeners are cleaned up in a
- *    `finally` block
- *
- * Partial-line handling:
- *  - `readline` guarantees complete lines (terminated by `\n`) — any
- *    incomplete final line without a newline is buffered by `readline`
- *    internally and delivered on the next `'line'` event or dropped when
- *    the stream ends. We log at debug level when the interface closes
- *    with a buffered partial line.
  */
 export async function* bridgeHermesSession(
   childProcess: ChildProcess,
+  options: BridgeOptions,
   abortSignal?: AbortSignal
 ): AsyncGenerator<MessageChunk> {
   const queue = new AsyncQueue<BridgeQueueItem>();
@@ -324,40 +148,64 @@ export async function* bridgeHermesSession(
   // emit duplicates (e.g. error event + non-zero exit both firing).
   let terminalEmitted = false;
 
+  let sessionId: string | undefined;
   const stderrLines: string[] = [];
 
-  // ── readline interface for stdout line-by-line consumption ─────────────
+  // ── stdout: line-by-line ACP JSON-RPC parser ──────────────────────────
+  // ACP uses newline-delimited JSON. We buffer for partial lines and
+  // parse each complete line as a JSON-RPC message.
+  let lineBuffer = '';
+  let pendingRequestId: number | undefined;
+  let requestResolve: ((msg: JsonRpcMessage) => void) | undefined;
+  let requestReject: ((err: Error) => void) | undefined;
+
   if (!childProcess.stdout) {
-    throw new Error('Hermes child process stdout is not available');
+    throw new Error('Hermes ACP child process stdout is not available');
   }
-  const rl = createInterface({
-    input: childProcess.stdout,
-    crlfDelay: Infinity,
-  });
 
-  // ── stdout: JSON line parsing ──────────────────────────────────────────
-  rl.on('line', (line: string) => {
-    if (line.trim().length === 0) return;
+  childProcess.stdout.on('data', (data: Buffer | string) => {
+    lineBuffer += data.toString();
+    const lines = lineBuffer.split('\n');
+    lineBuffer = lines.pop() ?? ''; // keep incomplete last line
 
-    let raw: unknown;
-    try {
-      raw = JSON.parse(line);
-    } catch {
-      getLog().warn({ line: line.slice(0, 200) }, 'hermes.bridge.invalid_json_line');
-      return;
-    }
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
 
-    const event = validateHermesEvent(raw);
-    if (!event) {
-      getLog().debug({ line: line.slice(0, 200) }, 'hermes.bridge.unknown_event_type');
-      return;
-    }
-
-    for (const chunk of mapHermesEvent(event)) {
-      if (chunk.type === 'result') {
-        terminalEmitted = true;
+      const msg = parseMessage(trimmed);
+      if (!msg) {
+        getLog().warn({ line: trimmed.slice(0, 200) }, 'acp.invalid_json');
+        continue;
       }
-      queue.push({ kind: 'chunk', chunk });
+
+      // Route response to pending request resolver
+      if ('id' in msg && msg.id === pendingRequestId && requestResolve) {
+        requestResolve(msg);
+        requestResolve = undefined;
+        requestReject = undefined;
+        pendingRequestId = undefined;
+        continue;
+      }
+
+      // Handle notifications (session/update)
+      if ('method' in msg && !('id' in msg)) {
+        const notif = msg;
+        if (notif.method === 'session/update' && notif.params) {
+          const params = notif.params as unknown as SessionUpdateParams;
+          const update = params.update;
+          if (update.sessionUpdate === 'agent_message_chunk') {
+            queue.push({
+              kind: 'chunk',
+              chunk: { type: 'assistant', content: update.content.text },
+            });
+          } else if (update.sessionUpdate === 'agent_thought_chunk') {
+            queue.push({
+              kind: 'chunk',
+              chunk: { type: 'thinking', content: update.content.text },
+            });
+          }
+        }
+      }
     }
   });
 
@@ -370,13 +218,24 @@ export async function* bridgeHermesSession(
     }
   });
 
+  // ── Terminate pending request on process exit/error ────────────────────
+  function rejectPending(reason: string): void {
+    if (requestReject) {
+      requestReject(new Error(reason));
+      requestReject = undefined;
+      requestResolve = undefined;
+      pendingRequestId = undefined;
+    }
+  }
+
   // ── process exit handling ──────────────────────────────────────────────
   childProcess.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
     if (code !== 0 && code !== null) {
       getLog().warn({ code, signal }, 'hermes.bridge.process_exited_nonzero');
+      rejectPending(`Hermes ACP exited with code ${code}`);
       if (!terminalEmitted) {
         terminalEmitted = true;
-        const errors = [`Hermes CLI exited with code ${code}`];
+        const errors = [`Hermes ACP exited with code ${code}`];
         if (stderrLines.length > 0) {
           errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
         }
@@ -387,6 +246,7 @@ export async function* bridgeHermesSession(
       }
     } else if (signal !== null) {
       getLog().warn({ signal }, 'hermes.bridge.process_terminated_by_signal');
+      rejectPending(`Hermes ACP terminated by signal ${signal}`);
       if (!terminalEmitted) {
         terminalEmitted = true;
         queue.push({
@@ -394,23 +254,10 @@ export async function* bridgeHermesSession(
           chunk: {
             type: 'result',
             isError: true,
-            errors: [`Hermes CLI terminated by signal ${signal}`],
+            errors: [`Hermes ACP terminated by signal ${signal}`],
           },
         });
       }
-    }
-
-    // If no terminal chunk was emitted at all (graceful exit with no `done`
-    // event), emit one now so the consumer always receives a result.
-    if (!terminalEmitted) {
-      terminalEmitted = true;
-      queue.push({
-        kind: 'chunk',
-        chunk: {
-          type: 'result',
-          errors: stderrLines.length > 0 ? [stderrLines.join('\n').slice(0, 500)] : undefined,
-        },
-      });
     }
 
     queue.push({ kind: 'done' });
@@ -419,6 +266,7 @@ export async function* bridgeHermesSession(
   // ── process error handling (spawn failure, EPIPE, etc.) ────────────────
   childProcess.on('error', (error: Error) => {
     getLog().error({ err: error }, 'hermes.bridge.process_error');
+    rejectPending(`Failed to run Hermes ACP: ${error.message}`);
     if (!terminalEmitted) {
       terminalEmitted = true;
       queue.push({
@@ -426,7 +274,7 @@ export async function* bridgeHermesSession(
         chunk: {
           type: 'result',
           isError: true,
-          errors: [`Failed to run Hermes CLI: ${error.message}`],
+          errors: [`Failed to run Hermes ACP: ${error.message}`],
         },
       });
     }
@@ -437,11 +285,25 @@ export async function* bridgeHermesSession(
   let sigkillTimeout: ReturnType<typeof setTimeout> | undefined;
   const onAbort = (): void => {
     getLog().debug('hermes.bridge.abort_signal_received');
+    // Send session/cancel notification (fire-and-forget)
+    if (sessionId) {
+      childProcess.stdin?.write(
+        serializeMessage(
+          createRequest(
+            'session/cancel' as const,
+            {
+              sessionId,
+            } as unknown as Record<string, unknown>
+          )
+        )
+      );
+    }
     childProcess.kill('SIGTERM');
     sigkillTimeout = setTimeout(() => {
       getLog().warn('hermes.bridge.sigkill_fallback');
       childProcess.kill('SIGKILL');
     }, 5000);
+    rejectPending('Query was aborted');
     if (!terminalEmitted) {
       terminalEmitted = true;
       queue.push({
@@ -460,6 +322,89 @@ export async function* bridgeHermesSession(
     }
   }
 
+  // ── Send ACP requests sequentially ─────────────────────────────────────
+  async function sendRequest(req: JsonRpcRequest): Promise<JsonRpcMessage> {
+    return new Promise((resolve, reject) => {
+      pendingRequestId = req.id;
+      requestResolve = resolve;
+      requestReject = reject;
+      if (!childProcess.stdin) {
+        reject(new Error('Hermes ACP child process stdin is not available'));
+        return;
+      }
+      childProcess.stdin.write(serializeMessage(req));
+    });
+  }
+
+  try {
+    // 1. Initialize
+    const initReq = createRequest('initialize', {
+      protocolVersion: 1,
+      clientCapabilities: {},
+      clientInfo: { name: 'archon', version: '0.3.9' },
+    });
+    await sendRequest(initReq);
+
+    // 2. New session
+    const sessionReq = createRequest('session/new', {
+      cwd: options.cwd,
+      mcpServers: [],
+    });
+    const sessionResp = await sendRequest(sessionReq);
+    if ('result' in sessionResp) {
+      sessionId = (sessionResp.result as Record<string, unknown>).sessionId as string;
+    }
+    if (!sessionId) {
+      throw new Error('Hermes ACP did not return a sessionId');
+    }
+
+    // 3. Send prompt
+    const blocks: ContentBlock[] = options.systemPrompt
+      ? [
+          { type: 'text', text: options.systemPrompt },
+          { type: 'text', text: options.prompt },
+        ]
+      : [{ type: 'text', text: options.prompt }];
+
+    const promptReq = createRequest('session/prompt', {
+      sessionId,
+      prompt: blocks,
+    });
+    const promptResp = await sendRequest(promptReq);
+
+    // 4. Emit terminal result
+    if (!terminalEmitted) {
+      terminalEmitted = true;
+      const stopReason =
+        'result' in promptResp
+          ? ((promptResp.result as Record<string, unknown>).stopReason as string)
+          : undefined;
+      queue.push({
+        kind: 'chunk',
+        chunk: {
+          type: 'result',
+          sessionId,
+          stopReason,
+        },
+      });
+    }
+    queue.push({ kind: 'done' });
+  } catch (err) {
+    getLog().error({ err }, 'hermes.bridge.acp_request_failed');
+    if (!terminalEmitted) {
+      terminalEmitted = true;
+      queue.push({
+        kind: 'chunk',
+        chunk: {
+          type: 'result',
+          isError: true,
+          errors: [(err as Error).message],
+        },
+      });
+    }
+    queue.push({ kind: 'done' });
+  }
+
   // ── consumer loop ──────────────────────────────────────────────────────
   try {
     for await (const item of queue) {
@@ -468,8 +413,7 @@ export async function* bridgeHermesSession(
       yield item.chunk;
     }
   } finally {
-    // Clean up: close queue, remove abort listener, clear sigkill timer,
-    // close readline interface.
+    // Clean up: close queue, remove abort listener, clear sigkill timer.
     queue.close();
 
     if (abortSignal) {
@@ -478,8 +422,6 @@ export async function* bridgeHermesSession(
     if (sigkillTimeout) {
       clearTimeout(sigkillTimeout);
     }
-
-    rl.close();
 
     // Ensure the child process is definitely killed if still running.
     try {

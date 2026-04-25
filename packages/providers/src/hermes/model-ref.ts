@@ -68,10 +68,15 @@ export function parseHermesModelRef(
 
 /**
  * Registry-level `isModelCompatible` check.
- * Syntactic only — returns true for the exact string "hermes" or any string
- * beginning with "hermes:". The actual model/provider availability is
- * validated at `sendQuery` time via the config and CLI binary.
+ *
+ * Always returns true — Hermes CLI resolves its own model and provider
+ * from ~/.hermes/config.yaml at runtime. Archon's workflow loader should
+ * not gatekeep models that Hermes itself can handle.
+ *
+ * The model string is passed through to `resolveHermesModel`, which falls
+ * back to the configured HERMES_MODEL env var when the modelRef doesn't
+ * match the "hermes:" prefix format.
  */
-export function isHermesModelCompatible(model: string): boolean {
-  return model === 'hermes' || model.startsWith('hermes:');
+export function isHermesModelCompatible(_model: string): boolean {
+  return true;
 }

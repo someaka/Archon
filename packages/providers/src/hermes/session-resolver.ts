@@ -34,7 +34,7 @@ export interface HermesSessionContext {
  *   - resumeSessionId: logged as unsupported (Hermes has no session store),
  *     but does NOT throw — the caller can surface a warning chunk.
  *
- * Hermes CLI is stateless by design: each `hermes chat` invocation is
+ * Hermes ACP is stateless by design: each `hermes acp` invocation is
  * independent. There is no session persistence, resume, or threading model
  * on the Hermes side. Archon holds the conversation history; Hermes just
  * processes single-turn prompts.

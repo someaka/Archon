@@ -94,28 +94,15 @@ describe('isHermesModelCompatible', () => {
     expect(isHermesModelCompatible('hermes:openrouter/anthropic/claude-opus-4')).toBe(true);
   });
 
-  test('rejects claude', () => {
-    expect(isHermesModelCompatible('claude')).toBe(false);
-  });
-
-  test('rejects codex', () => {
-    expect(isHermesModelCompatible('codex')).toBe(false);
-  });
-
-  test('rejects empty string', () => {
-    expect(isHermesModelCompatible('')).toBe(false);
-  });
-
-  test('rejects sonnet', () => {
-    expect(isHermesModelCompatible('sonnet')).toBe(false);
-  });
-
-  test('rejects pi model refs', () => {
-    expect(isHermesModelCompatible('google/gemini-2.5-pro')).toBe(false);
-  });
-
-  test('rejects hermes-like without colon', () => {
-    expect(isHermesModelCompatible('hermes-ollama')).toBe(false);
+  test('always returns true — Hermes CLI resolves its own models', () => {
+    // Hermes CLI resolves model/provider from ~/.hermes/config.yaml at runtime.
+    // Archon's workflow loader should not gatekeep models that Hermes itself can handle.
+    expect(isHermesModelCompatible('claude')).toBe(true);
+    expect(isHermesModelCompatible('codex')).toBe(true);
+    expect(isHermesModelCompatible('')).toBe(true);
+    expect(isHermesModelCompatible('sonnet')).toBe(true);
+    expect(isHermesModelCompatible('google/gemini-2.5-pro')).toBe(true);
+    expect(isHermesModelCompatible('hermes-ollama')).toBe(true);
   });
 
   test('accepts any string starting with "hermes:"', () => {

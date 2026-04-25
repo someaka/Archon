@@ -7,6 +7,7 @@ import { createMockLogger } from '../test/mocks/logger';
 const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
+  BUNDLED_IS_BINARY: false,
 }));
 
 import { resolveHermesSession } from './session-resolver';

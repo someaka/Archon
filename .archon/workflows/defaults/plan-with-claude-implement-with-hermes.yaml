@@ -14,5 +14,4 @@ nodes:
       Plan:
       $PLAN_OUTPUT
     provider: hermes
-    model: qwen2.5-coder:32b
     depends_on: [plan]
