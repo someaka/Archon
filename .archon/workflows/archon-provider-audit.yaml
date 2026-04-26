@@ -1,0 +1,96 @@
+name: archon-provider-audit
+description: |
+  Use when: Auditing Archon provider code for quality, duplication, and pattern alignment.
+  Triggers: "audit providers", "provider audit", "code review providers", "polish providers",
+            "clean up provider code", "integrate repo patterns".
+  Does: Runs 4 parallel audit agents (one per provider: Claude, Codex, Pi, Hermes) ->
+        synthesizes findings into a consolidated report -> produces fix plan.
+  NOT for: Auditing non-provider code, general codebase audits, PR reviews.
+
+nodes:
+  - id: scope
+    prompt: |
+      List all files in packages/providers/src/claude/, packages/providers/src/codex/,
+      packages/providers/src/community/pi/, and packages/providers/src/hermes/.
+      Report the file count and total lines per provider.
+    provider: claude
+
+  - id: audit-claude
+    prompt: |
+      AUDIT: Claude Code Provider
+      
+      Read ALL files in packages/providers/src/claude/ and compare against:
+      - packages/providers/src/codex/ (for duplication)
+      - packages/providers/src/hermes/ (for duplication)
+      - packages/providers/src/community/pi/ (for duplication)
+      - packages/providers/src/types.ts (for type alignment)
+      
+      Find: code duplication, inelegances, missing shared utility usage, type issues,
+      error handling gaps, naming inconsistencies, test coverage gaps.
+      
+      Write findings to /home/d/Desktop/Archon-canonical/.hermes/plans/audit-claude-provider.md
+    provider: claude
+    depends_on: [scope]
+
+  - id: audit-codex
+    prompt: |
+      AUDIT: Codex Provider + Cross-Provider Patterns
+      
+      Read ALL files in packages/providers/src/codex/ and ALL files in packages/providers/src/hermes/.
+      Compare against packages/providers/src/claude/ and packages/providers/src/community/pi/.
+      
+      Find: cross-provider duplication, shared abstraction gaps, inconsistent patterns,
+      env merging differences, spawn pattern differences, chunk emission differences.
+      
+      Write findings to /home/d/Desktop/Archon-canonical/.hermes/plans/audit-codex-cross-provider.md
+    provider: claude
+    depends_on: [scope]
+
+  - id: audit-pi
+    prompt: |
+      AUDIT: Pi Provider + Project Utilities
+      
+      Read ALL files in packages/providers/src/community/pi/ and ALL shared utilities:
+      - packages/paths/src/*.ts
+      - packages/core/src/utils/*.ts
+      - packages/providers/src/types.ts
+      - packages/providers/src/errors.ts
+      - packages/providers/src/registry.ts
+      
+      Find: Pi-specific issues, utility reuse gaps, inconsistent patterns vs other providers,
+      error handling consistency, type export completeness.
+      
+      Write findings to /home/d/Desktop/Archon-canonical/.hermes/plans/audit-pi-utilities.md
+    provider: claude
+    depends_on: [scope]
+
+  - id: audit-hermes
+    prompt: |
+      AUDIT: Hermes Provider + ACP Integration + Tests
+      
+      Read ALL files in packages/providers/src/hermes/ including ALL .test.ts files.
+      Also read packages/providers/src/test/mocks/ and packages/providers/package.json.
+      
+      Find: ACP protocol issues, bridge issues, test quality gaps, mock completeness,
+      test batching configuration, stale references to old bridge.
+      
+      Write findings to /home/d/Desktop/Archon-canonical/.hermes/plans/audit-hermes-tests.md
+    provider: claude
+    depends_on: [scope]
+
+  - id: synthesize
+    prompt: |
+      SYNTHESIZE: Read all 4 audit reports:
+      - .hermes/plans/audit-claude-provider.md
+      - .hermes/plans/audit-codex-cross-provider.md
+      - .hermes/plans/audit-pi-utilities.md
+      - .hermes/plans/audit-hermes-tests.md
+      
+      Produce a consolidated master audit report at:
+      /home/d/Desktop/Archon-canonical/.hermes/plans/audit-master-synthesis.md
+      
+      Deduplicate overlapping findings. Rank by severity (CRITICAL/IMPORTANT/MINOR).
+      Group by theme: duplication, inconsistency, type safety, test coverage, etc.
+    provider: claude
+    depends_on: [audit-claude, audit-codex, audit-pi, audit-hermes]
+    trigger_rule: one_success

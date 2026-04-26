@@ -1,35 +1,20 @@
 /**
  * Hermes CLI resolver for compiled (bun --compile) archon binaries.
  *
- * The Hermes provider spawns a subprocess using the `hermes` binary.
- * In dev mode the binary is resolved from PATH; in compiled binaries
- * we need explicit resolution so the frozen build path doesn't break
- * on end-user machines.
- *
- * Resolution order (binary mode only):
- * 1. `HERMES_BINARY_PATH` environment variable
- * 2. `assistants.hermes.hermesBinaryPath` in config
- * 3. Autodetect canonical install path (`~/.local/bin/hermes`)
- * 4. Return undefined (caller falls back to PATH)
+ * Thin wrapper around the shared binary resolver that supplies
+ * provider-specific strings (env var name, install instructions, etc.).
  *
  * In dev mode (BUNDLED_IS_BINARY=false), returns undefined so the caller
  * falls back to `'hermes'` from PATH.
  */
-import { existsSync as _existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { BUNDLED_IS_BINARY, createLogger } from '@archon/paths';
+import { existsSync as _existsSync } from 'node:fs';
+import { resolveBinaryPath } from '../utils/binary-resolver';
 
 /** Wrapper for existsSync — enables spyOn in tests (direct imports can't be spied on). */
 export function fileExists(path: string): boolean {
   return _existsSync(path);
-}
-
-/** Lazy-initialized logger */
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('hermes-binary');
-  return cachedLog;
 }
 
 export const INSTALL_INSTRUCTIONS =
@@ -59,43 +44,22 @@ export const INSTALL_INSTRUCTIONS =
 export async function resolveHermesBinary(
   configHermesBinaryPath?: string
 ): Promise<string | undefined> {
-  if (!BUNDLED_IS_BINARY) return undefined;
-
-  // 1. Environment variable override
-  const envPath = process.env.HERMES_BINARY_PATH;
-  if (envPath) {
-    if (!fileExists(envPath)) {
-      throw new Error(
-        `HERMES_BINARY_PATH is set to "${envPath}" but the file does not exist.\n` +
-          'Please verify the path points to the Hermes executable.'
-      );
-    }
-    getLog().info({ binaryPath: envPath, source: 'env' }, 'hermes.binary_resolved');
-    return envPath;
-  }
-
-  // 2. Config file override
-  if (configHermesBinaryPath) {
-    if (!fileExists(configHermesBinaryPath)) {
-      throw new Error(
-        `assistants.hermes.hermesBinaryPath is set to "${configHermesBinaryPath}" but the file does not exist.\n` +
-          'Please verify the path in .archon/config.yaml points to the Hermes executable.'
-      );
-    }
-    getLog().info(
-      { binaryPath: configHermesBinaryPath, source: 'config' },
-      'hermes.binary_resolved'
-    );
-    return configHermesBinaryPath;
-  }
-
-  // 3. Autodetect — canonical user-local install path
   const canonicalPath = join(homedir(), '.local', 'bin', 'hermes');
-  if (fileExists(canonicalPath)) {
-    getLog().info({ binaryPath: canonicalPath, source: 'autodetect' }, 'hermes.binary_resolved');
-    return canonicalPath;
-  }
 
-  // 4. Not found — return undefined so caller falls back to PATH
-  return undefined;
+  return resolveBinaryPath({
+    envVar: 'HERMES_BINARY_PATH',
+    configPath: configHermesBinaryPath,
+    autodetectPaths: [canonicalPath],
+    throwOnMiss: false,
+    logId: 'hermes-binary',
+    logEvent: 'hermes.binary_resolved',
+    binaryName: 'Hermes',
+    fileExists,
+    envErrorMessage: envPath =>
+      `HERMES_BINARY_PATH is set to "${envPath}" but the file does not exist.\n` +
+      'Please verify the path points to the Hermes executable.',
+    configErrorMessage: configPath =>
+      `assistants.hermes.hermesBinaryPath is set to "${configPath}" but the file does not exist.\n` +
+      'Please verify the path in .archon/config.yaml points to the Hermes executable.',
+  });
 }

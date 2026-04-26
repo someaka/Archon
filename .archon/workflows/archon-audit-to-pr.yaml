@@ -1,0 +1,484 @@
+name: archon-audit-to-pr
+
+model: kimi-k2.6
+provider: hermes
+
+description: |
+  Use when: User wants to systematically audit a codebase area, synthesize findings into a severity-ranked report, and convert CRITICAL/IMPORTANT findings into a PR with fixes.
+  Triggers: "audit to PR", "audit and fix", "audit providers and fix", "run audit then PR",
+            "audit codebase and create PR", "systematic audit with fixes".
+  Does: Scans scope -> runs parallel audit agents per domain -> synthesizes findings into severity-ranked report ->
+        auto-creates fix PR for CRITICAL/IMPORTANT issues -> runs validation -> marks PR ready.
+  NOT for: Quick code reviews (use archon-smart-pr-review), general exploration, standalone audits without fixes.
+
+  Inspired by archon-provider-audit.yaml (parallel per-domain audit) + archon-fix-github-issue.yaml (investigate/plan/implement/validate/PR).
+  The audit phase is read-only; the fix phase is surgical — only CRITICAL and IMPORTANT findings get code changes.
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 1: SCOPE — Identify audit targets and file inventory
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: scope
+    bash: |
+      echo "=== AUDIT TARGET ==="
+      echo "User request: $ARGUMENTS"
+      echo ""
+
+      # Detect audit target from arguments
+      REQUEST_LOWER=$(echo "$ARGUMENTS" | tr '[:upper:]' '[:lower:]')
+
+      if echo "$REQUEST_LOWER" | grep -qE 'provider|providers|claude|codex|hermes|pi'; then
+        TARGET="providers"
+        TARGET_DIRS="packages/providers/src/claude/ packages/providers/src/codex/ packages/providers/src/hermes/ packages/providers/src/community/pi/"
+      elif echo "$REQUEST_LOWER" | grep -qE 'workflow|workflows|engine|dag|node'; then
+        TARGET="workflows"
+        TARGET_DIRS="packages/workflows/src/"
+      elif echo "$REQUEST_LOWER" | grep -qE 'server|api|route|endpoint'; then
+        TARGET="server"
+        TARGET_DIRS="packages/server/src/"
+      elif echo "$REQUEST_LOWER" | grep -qE 'core|util|shared|common'; then
+        TARGET="core"
+        TARGET_DIRS="packages/core/src/"
+      else
+        TARGET="auto"
+        TARGET_DIRS="."
+      fi
+
+      echo "TARGET=$TARGET"
+      echo "TARGET_DIRS=$TARGET_DIRS"
+      echo ""
+
+      # File inventory
+      echo "=== FILE INVENTORY ==="
+      for dir in $TARGET_DIRS; do
+        if [ -d "$dir" ]; then
+          echo "--- $dir ---"
+          find "$dir" -type f \( -name "*.ts" -o -name "*.js" -o -name "*.yaml" -o -name "*.yml" \) | sort
+          echo ""
+        fi
+      done
+
+      echo "=== SIZE ANALYSIS ==="
+      for dir in $TARGET_DIRS; do
+        if [ -d "$dir" ]; then
+          find "$dir" -name "*.ts" -not -name "*.test.ts" -not -name "*.d.ts" -exec wc -l {} + 2>/dev/null | sort -rn | head -10
+        fi
+      done
+
+      # Save target for downstream nodes
+      echo "$TARGET" > "$ARTIFACTS_DIR/.audit-target"
+      echo "$TARGET_DIRS" > "$ARTIFACTS_DIR/.audit-target-dirs"
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 2: PARALLEL AUDIT — One agent per domain
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: audit-domain-1
+    prompt: |
+      You are a senior code auditor. Audit the FIRST domain of the target codebase.
+
+      ## Target
+      Read the target directories from `$ARTIFACTS_DIR/.audit-target-dirs`.
+
+      ## Instructions
+      1. Read ALL source files in your assigned domain (skip .test.ts and .d.ts)
+      2. Compare against sibling domains for duplication and inconsistency
+      3. Check against project conventions in CLAUDE.md
+      4. Find: code duplication, type safety issues, error handling gaps,
+         naming inconsistencies, test coverage gaps, dead code, security issues
+
+      ## Output
+      Write findings to `$ARTIFACTS_DIR/audit-domain-1.md` with:
+      - CRITICAL: crashes, security breaches, silent data corruption, unreliable tests
+      - IMPORTANT: incorrect runtime behavior, user-facing bugs, significant test gaps, type-safety holes
+      - MINOR: technical debt, naming inconsistencies, duplication, dead code
+
+      For each finding: file path, line numbers, issue description, impact, suggested fix.
+    depends_on: [scope]
+    context: fresh
+
+  - id: audit-domain-2
+    prompt: |
+      You are a senior code auditor. Audit the SECOND domain of the target codebase.
+
+      ## Target
+      Read the target directories from `$ARTIFACTS_DIR/.audit-target-dirs`.
+
+      ## Instructions
+      1. Read ALL source files in your assigned domain (skip .test.ts and .d.ts)
+      2. Compare against sibling domains for duplication and inconsistency
+      3. Check against project conventions in CLAUDE.md
+      4. Find: code duplication, type safety issues, error handling gaps,
+         naming inconsistencies, test coverage gaps, dead code, security issues
+
+      ## Output
+      Write findings to `$ARTIFACTS_DIR/audit-domain-2.md` with:
+      - CRITICAL: crashes, security breaches, silent data corruption, unreliable tests
+      - IMPORTANT: incorrect runtime behavior, user-facing bugs, significant test gaps, type-safety holes
+      - MINOR: technical debt, naming inconsistencies, duplication, dead code
+
+      For each finding: file path, line numbers, issue description, impact, suggested fix.
+    depends_on: [scope]
+    context: fresh
+
+  - id: audit-domain-3
+    prompt: |
+      You are a senior code auditor. Audit the THIRD domain of the target codebase.
+
+      ## Target
+      Read the target directories from `$ARTIFACTS_DIR/.audit-target-dirs`.
+
+      ## Instructions
+      1. Read ALL source files in your assigned domain (skip .test.ts and .d.ts)
+      2. Compare against sibling domains for duplication and inconsistency
+      3. Check against project conventions in CLAUDE.md
+      4. Find: code duplication, type safety issues, error handling gaps,
+         naming inconsistencies, test coverage gaps, dead code, security issues
+
+      ## Output
+      Write findings to `$ARTIFACTS_DIR/audit-domain-3.md` with:
+      - CRITICAL: crashes, security breaches, silent data corruption, unreliable tests
+      - IMPORTANT: incorrect runtime behavior, user-facing bugs, significant test gaps, type-safety holes
+      - MINOR: technical debt, naming inconsistencies, duplication, dead code
+
+      For each finding: file path, line numbers, issue description, impact, suggested fix.
+    depends_on: [scope]
+    context: fresh
+
+  - id: audit-domain-4
+    prompt: |
+      You are a senior code auditor. Audit the FOURTH domain of the target codebase.
+
+      ## Target
+      Read the target directories from `$ARTIFACTS_DIR/.audit-target-dirs`.
+
+      ## Instructions
+      1. Read ALL source files in your assigned domain (skip .test.ts and .d.ts)
+      2. Compare against sibling domains for duplication and inconsistency
+      3. Check against project conventions in CLAUDE.md
+      4. Find: code duplication, type safety issues, error handling gaps,
+         naming inconsistencies, test coverage gaps, dead code, security issues
+
+      ## Output
+      Write findings to `$ARTIFACTS_DIR/audit-domain-4.md` with:
+      - CRITICAL: crashes, security breaches, silent data corruption, unreliable tests
+      - IMPORTANT: incorrect runtime behavior, user-facing bugs, significant test gaps, type-safety holes
+      - MINOR: technical debt, naming inconsistencies, duplication, dead code
+
+      For each finding: file path, line numbers, issue description, impact, suggested fix.
+    depends_on: [scope]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 3: SYNTHESIZE — Deduplicate, rank, and produce master report
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: synthesize
+    prompt: |
+      You are an audit synthesis engineer. Read all domain audit reports and produce a consolidated master report.
+
+      ## Inputs
+      Read these files if they exist:
+      - `$ARTIFACTS_DIR/audit-domain-1.md`
+      - `$ARTIFACTS_DIR/audit-domain-2.md`
+      - `$ARTIFACTS_DIR/audit-domain-3.md`
+      - `$ARTIFACTS_DIR/audit-domain-4.md`
+
+      ## Instructions
+      1. Deduplicate findings that appear in multiple domain reports
+      2. Re-rank severity across the full surface:
+         - CRITICAL: can cause crashes, security breaches, silent data corruption, or completely unreliable test results
+         - IMPORTANT: causes incorrect runtime behavior, user-facing bugs, significant test gaps, or type-safety holes
+         - MINOR: technical debt, naming inconsistencies, duplication, low-impact dead code
+      3. Group by theme: duplication, inconsistency, type safety, test coverage, security, error handling, dead code
+      4. Within each severity level, order by impact
+
+      ## Output
+      Write the master synthesis to `$ARTIFACTS_DIR/audit-master-synthesis.md` with:
+
+      ### Executive Summary
+      - Total findings by severity
+      - Top 3 most critical issues (one-liner each)
+      - Recommended immediate actions
+
+      ### CRITICAL Findings
+      Numbered list (C1, C2, ...) with: source domain, issue, impact, fix
+
+      ### IMPORTANT Findings
+      Numbered list (I1, I2, ...) with: source domain, issue, impact, fix
+
+      ### MINOR Findings
+      Numbered list (M1, M2, ...) with: source domain, issue, impact, fix
+
+      ### Cross-Cutting Recommendations
+      Priority-ordered action list (Immediate / Short-Term / Medium-Term / Opportunistic)
+
+      ### Appendix: Methodology
+      How the audit was conducted, which domains were covered, any limitations
+    depends_on: [audit-domain-1, audit-domain-2, audit-domain-3, audit-domain-4]
+    trigger_rule: one_success
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 4: FIX PLAN — Extract CRITICAL + IMPORTANT into actionable fix list
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: fix-plan
+    prompt: |
+      You are a fix planner. Convert the master audit synthesis into an ordered fix task list.
+
+      ## Input
+      Read `$ARTIFACTS_DIR/audit-master-synthesis.md`
+
+      ## Instructions
+      1. Extract ONLY CRITICAL and IMPORTANT findings
+      2. For each, determine:
+         - Can it be fixed with a localized code change? (yes = include in fix plan)
+         - Does it require architectural changes? (yes = flag as "needs design PR", skip from this fix batch)
+         - Is it a test-only issue? (yes = include, but mark as test task)
+      3. Order by: CRITICAL first, then IMPORTANT by estimated fix complexity (easiest first)
+      4. Each task must be specific enough that an implementer can execute it without re-reading the audit
+
+      ## Output
+      Write the fix plan to `$ARTIFACTS_DIR/fix-plan.md` with:
+
+      ### Fixable in This Batch
+      Ordered task list. Each task:
+      ```
+      ## Task N: [brief description]
+      **Severity**: CRITICAL | IMPORTANT
+      **File(s)**: path/to/file.ts
+      **Lines**: X-Y
+      **Issue**: one-line summary
+      **Fix**: specific description of what to change
+      **Validation**: how to verify the fix (test command, type-check, etc.)
+      ```
+
+      ### Needs Design PR (architectural)
+      Findings that require broader design discussion before implementation.
+
+      ### Test-Only Tasks
+      Findings that are purely about adding/missing tests.
+
+      ### Estimated Effort
+      Rough time estimate for the fixable batch.
+    depends_on: [synthesize]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 5: BRANCH SETUP — Create isolated worktree for fixes
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: branch-setup
+    bash: |
+      TARGET=$(cat "$ARTIFACTS_DIR/.audit-target" 2>/dev/null | tr -d '\n')
+      BRANCH_NAME="audit-fix-$(date +%Y%m%d)-${TARGET:-general}"
+
+      # Create branch from current HEAD
+      git checkout -b "$BRANCH_NAME"
+
+      echo "$BRANCH_NAME" > "$ARTIFACTS_DIR/.fix-branch"
+      echo "Created branch: $BRANCH_NAME"
+    depends_on: [fix-plan]
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 6: IMPLEMENT FIXES — Execute fix plan with guardrails
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    model: kimi-k2.6
+    prompt: |
+      You are implementing audit fixes with strict safety guardrails.
+
+      ## Plan
+      Read the fix plan from `$ARTIFACTS_DIR/fix-plan.md` — follow it LITERALLY.
+      Also read the master synthesis from `$ARTIFACTS_DIR/audit-master-synthesis.md` for context.
+
+      ## Rules
+      - **Follow the plan exactly** — do not add extra improvements or cleanups
+      - **One task at a time** — complete each task fully before starting the next
+      - **Type-check after every file change** — run `bun run type-check` before proceeding
+      - **Preserve all behavior** — fix the issue, don't refactor adjacent code
+      - **Commit after each task** — one commit per fix with a clear message: `fix(audit): [brief description]`
+      - **If a fix is more complex than planned** — complete it anyway, note the deviation in the commit message
+      - **If type-check fails** — fix it immediately before proceeding
+      - **Never skip a task** — complete them in order
+
+      ## Process for Each Task
+      1. Read the task from the fix plan
+      2. Read the target file(s) to understand current state
+      3. Make the minimal change to fix the issue
+      4. Run `bun run type-check` to verify
+      5. If the task has a validation command, run it
+      6. Commit: `git add -A && git commit -m "fix(audit): [task description]"`
+      7. Move to next task
+
+      ## Handling Problems
+      - If a fix introduces a type error: fix the type error, do not suppress it
+      - If a fix breaks a test: investigate whether the test was testing the buggy behavior (update test) or the fix is wrong (revert and reassess)
+      - If you discover the plan missed a dependency: fix it and note it in the commit message
+    depends_on: [branch-setup]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 7: VALIDATE — Full validation suite
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: validate
+    bash: |
+      echo "=== TYPE CHECK ==="
+      bun run type-check 2>&1
+      TC_EXIT=$?
+
+      echo ""
+      echo "=== LINT ==="
+      bun run lint 2>&1
+      LINT_EXIT=$?
+
+      echo ""
+      echo "=== FORMAT CHECK ==="
+      bun run format:check 2>&1
+      FMT_EXIT=$?
+
+      echo ""
+      echo "=== TESTS ==="
+      bun run test 2>&1
+      TEST_EXIT=$?
+
+      echo ""
+      echo "=== RESULTS ==="
+      echo "Type check: $([ $TC_EXIT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+      echo "Lint: $([ $LINT_EXIT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+      echo "Format: $([ $FMT_EXIT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+      echo "Tests: $([ $TEST_EXIT -eq 0 ] && echo 'PASS' || echo 'FAIL')"
+
+      if [ $TC_EXIT -eq 0 ] && [ $LINT_EXIT -eq 0 ] && [ $FMT_EXIT -eq 0 ] && [ $TEST_EXIT -eq 0 ]; then
+        echo "VALIDATION_STATUS: PASS"
+      else
+        echo "VALIDATION_STATUS: FAIL"
+      fi
+    depends_on: [implement-fixes]
+    timeout: 300000
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 8: FIX VALIDATION FAILURES (if any)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: fix-validation-failures
+    prompt: |
+      Review the validation output below.
+
+      ## Validation Output
+
+      $validate.output
+
+      ## Instructions
+
+      If the output ends with "VALIDATION_STATUS: PASS", respond with
+      "All checks passed — no fixes needed." and stop.
+
+      If there are failures:
+
+      1. Read the validation failures carefully
+      2. Fix ONLY what's broken — do not make additional improvements
+      3. If a fix requires changing behavior (not just fixing a type/lint error), revert the original change instead
+      4. Run the specific failing check after each fix to confirm it passes
+      5. After all fixes, run the full validation suite: `bun run validate`
+
+      ## Rules
+      - One fix at a time
+      - Type-check after every file change
+      - Commit each fix: `git add -A && git commit -m "fix(audit): [description]"`
+    depends_on: [validate]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 9: CREATE PR — Push branch and create draft PR
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: create-pr
+    prompt: |
+      Create a pull request for the audit fixes.
+
+      ## Context
+
+      - **Audit target**: Read `$ARTIFACTS_DIR/.audit-target`
+      - **Master synthesis**: Read `$ARTIFACTS_DIR/audit-master-synthesis.md`
+      - **Fix plan**: Read `$ARTIFACTS_DIR/fix-plan.md`
+      - **Validation**: $validate.output
+      - **Branch**: Read `$ARTIFACTS_DIR/.fix-branch`
+
+      ## Instructions
+
+      1. Ensure all changes are committed. If uncommitted changes exist, stage and commit them.
+      2. Push the branch: `git push -u origin HEAD`
+      3. Check if a PR already exists: `gh pr list --head $(git branch --show-current)`
+         - If PR exists, skip creation and capture its number
+      4. Look for the project's PR template at `.github/pull_request_template.md`, `.github/PULL_REQUEST_TEMPLATE.md`, or `docs/PULL_REQUEST_TEMPLATE.md`. Read whichever one exists.
+      5. Create a DRAFT PR: `gh pr create --draft --base dev`
+         - Title: `fix(audit): [concise description of the audit target]` (under 70 chars)
+         - Body: if a PR template was found, fill in every section with details from the audit. Include:
+           - Summary of audit findings (CRITICAL/IMPORTANT/MINOR counts)
+           - List of fixes applied
+           - Validation evidence (type-check, lint, tests all pass)
+           - Link to the master synthesis file for full details
+           - Any findings flagged as "needs design PR"
+      6. Capture PR identifiers:
+         ```bash
+         PR_NUMBER=$(gh pr view --json number -q '.number')
+         echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
+         PR_URL=$(gh pr view --json url -q '.url')
+         echo "$PR_URL" > "$ARTIFACTS_DIR/.pr-url"
+         ```
+    depends_on: [fix-validation-failures]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════
+  # PHASE 10: FINAL REPORT — Summarize audit + PR for user
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: final-report
+    prompt: |
+      Generate a final summary report for the user.
+
+      ## Read These Files
+
+      1. `$ARTIFACTS_DIR/audit-master-synthesis.md` — master audit report
+      2. `$ARTIFACTS_DIR/fix-plan.md` — what was planned to fix
+      3. `$ARTIFACTS_DIR/.pr-number` — PR number
+      4. `$ARTIFACTS_DIR/.pr-url` — PR URL
+      5. `$ARTIFACTS_DIR/.fix-branch` — branch name
+
+      ## Output Format
+
+      ```
+      # Audit-to-PR Complete
+
+      ## Audit Summary
+      - Target: [what was audited]
+      - Total findings: N (C critical, I important, M minor)
+      - Master report: `$ARTIFACTS_DIR/audit-master-synthesis.md`
+
+      ## Fixes Applied
+      - Branch: [branch name]
+      - PR: [#N](URL) (draft)
+      - Fixes committed: N tasks
+      - Validation: [PASS / FAIL with details]
+
+      ## Top Critical Findings
+      1. [C1 description]
+      2. [C2 description]
+      ...
+
+      ## Deferred to Design PR
+      [Any findings flagged as architectural / needs design discussion]
+
+      ## Next Steps
+      1. Review the draft PR
+      2. [Any specific follow-up actions]
+      ```
+
+      Output this report directly to the user.
+    depends_on: [create-pr]
+    context: fresh
