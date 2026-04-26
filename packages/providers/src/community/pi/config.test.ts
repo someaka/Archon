@@ -6,21 +6,27 @@ describe('parsePiConfig', () => {
   test('parses valid model string', () => {
     expect(parsePiConfig({ model: 'google/gemini-2.5-pro' })).toEqual({
       model: 'google/gemini-2.5-pro',
+      enableExtensions: false,
     });
   });
 
   test('drops invalid model type silently', () => {
-    expect(parsePiConfig({ model: 123 })).toEqual({});
+    expect(parsePiConfig({ model: 123 })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('ignores unknown keys', () => {
     expect(parsePiConfig({ futureField: 'x', model: 'google/gemini-2.5-pro' })).toEqual({
       model: 'google/gemini-2.5-pro',
+      enableExtensions: false,
     });
   });
 
   test('returns empty object for empty input', () => {
-    expect(parsePiConfig({})).toEqual({});
+    expect(parsePiConfig({})).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('does not throw on malformed input', () => {
@@ -41,9 +47,21 @@ describe('parsePiConfig', () => {
   });
 
   test('drops non-boolean enableExtensions silently', () => {
-    expect(parsePiConfig({ enableExtensions: 'yes' })).toEqual({});
-    expect(parsePiConfig({ enableExtensions: 1 })).toEqual({});
-    expect(parsePiConfig({ enableExtensions: null })).toEqual({});
+    expect(parsePiConfig({ enableExtensions: 'yes' })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ enableExtensions: 1 })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ enableExtensions: null })).toEqual({
+      enableExtensions: false,
+    });
+  });
+
+  test('defaults enableExtensions to false when not provided', () => {
+    expect(parsePiConfig({})).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('combines model and enableExtensions', () => {
@@ -54,17 +72,29 @@ describe('parsePiConfig', () => {
   });
 
   test('parses interactive: true', () => {
-    expect(parsePiConfig({ interactive: true })).toEqual({ interactive: true });
+    expect(parsePiConfig({ interactive: true })).toEqual({
+      interactive: true,
+      enableExtensions: false,
+    });
   });
 
   test('parses interactive: false', () => {
-    expect(parsePiConfig({ interactive: false })).toEqual({ interactive: false });
+    expect(parsePiConfig({ interactive: false })).toEqual({
+      interactive: false,
+      enableExtensions: false,
+    });
   });
 
   test('drops non-boolean interactive silently', () => {
-    expect(parsePiConfig({ interactive: 'yes' })).toEqual({});
-    expect(parsePiConfig({ interactive: 1 })).toEqual({});
-    expect(parsePiConfig({ interactive: null })).toEqual({});
+    expect(parsePiConfig({ interactive: 'yes' })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ interactive: 1 })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ interactive: null })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('combines all three fields', () => {
@@ -84,6 +114,7 @@ describe('parsePiConfig', () => {
   test('parses extensionFlags with boolean and string values', () => {
     expect(parsePiConfig({ extensionFlags: { plan: true, profile: 'Default' } })).toEqual({
       extensionFlags: { plan: true, profile: 'Default' },
+      enableExtensions: false,
     });
   });
 
@@ -92,17 +123,28 @@ describe('parsePiConfig', () => {
       parsePiConfig({
         extensionFlags: { plan: true, bogus: 42, nested: { x: 1 }, nullish: null },
       })
-    ).toEqual({ extensionFlags: { plan: true } });
+    ).toEqual({
+      extensionFlags: { plan: true },
+      enableExtensions: false,
+    });
   });
 
   test('drops extensionFlags when all entries are invalid', () => {
-    expect(parsePiConfig({ extensionFlags: { bogus: 42, nested: {} } })).toEqual({});
+    expect(parsePiConfig({ extensionFlags: { bogus: 42, nested: {} } })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('drops non-object extensionFlags silently', () => {
-    expect(parsePiConfig({ extensionFlags: 'plan=true' })).toEqual({});
-    expect(parsePiConfig({ extensionFlags: ['plan', 'true'] })).toEqual({});
-    expect(parsePiConfig({ extensionFlags: null })).toEqual({});
+    expect(parsePiConfig({ extensionFlags: 'plan=true' })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ extensionFlags: ['plan', 'true'] })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ extensionFlags: null })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('combines extensionFlags with other fields', () => {
@@ -124,23 +166,35 @@ describe('parsePiConfig', () => {
   test('parses env with string values', () => {
     expect(parsePiConfig({ env: { PLANNOTATOR_REMOTE: '1', FOO: 'bar' } })).toEqual({
       env: { PLANNOTATOR_REMOTE: '1', FOO: 'bar' },
+      enableExtensions: false,
     });
   });
 
   test('drops non-string env values silently', () => {
     expect(
       parsePiConfig({ env: { GOOD: 'yes', BOOL: true, NUM: 42, NESTED: { x: 1 }, NULLISH: null } })
-    ).toEqual({ env: { GOOD: 'yes' } });
+    ).toEqual({
+      env: { GOOD: 'yes' },
+      enableExtensions: false,
+    });
   });
 
   test('drops env when all entries are invalid', () => {
-    expect(parsePiConfig({ env: { NUM: 42, NESTED: {} } })).toEqual({});
+    expect(parsePiConfig({ env: { NUM: 42, NESTED: {} } })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('drops non-object env silently', () => {
-    expect(parsePiConfig({ env: 'PLANNOTATOR_REMOTE=1' })).toEqual({});
-    expect(parsePiConfig({ env: ['A=1'] })).toEqual({});
-    expect(parsePiConfig({ env: null })).toEqual({});
+    expect(parsePiConfig({ env: 'PLANNOTATOR_REMOTE=1' })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ env: ['A=1'] })).toEqual({
+      enableExtensions: false,
+    });
+    expect(parsePiConfig({ env: null })).toEqual({
+      enableExtensions: false,
+    });
   });
 
   test('combines env with other fields', () => {
