@@ -18,14 +18,10 @@ import type {
 import { parseCodexConfig } from './config';
 import { CODEX_CAPABILITIES } from './capabilities';
 import { resolveCodexBinaryPath } from './binary-resolver';
-import { createLogger } from '@archon/paths';
+import { createLazyLogger } from '../utils/lazy-logger';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.codex');
-  return cachedLog;
-}
+const getLog = createLazyLogger('provider.codex');
 
 // Singleton Codex instance (async because binary path resolution is async)
 let codexInstance: Codex | null = null;

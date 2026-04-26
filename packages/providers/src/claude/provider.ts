@@ -39,16 +39,12 @@ import type {
 import { parseClaudeConfig } from './config';
 import { CLAUDE_CAPABILITIES } from './capabilities';
 import { resolveClaudeBinaryPath } from './binary-resolver';
-import { createLogger } from '@archon/paths';
 import { readFile } from 'fs/promises';
 import { resolve, isAbsolute } from 'path';
+import { createLazyLogger } from '../utils/lazy-logger';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.claude');
-  return cachedLog;
-}
+const getLog = createLazyLogger('provider.claude');
 
 /**
  * Content block type for assistant messages

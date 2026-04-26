@@ -1,4 +1,3 @@
-import { createLogger } from '@archon/paths';
 import type { ChildProcess } from 'child_process';
 
 import type { MessageChunk } from '../types';
@@ -12,12 +11,9 @@ import {
   type JsonRpcRequest,
   type SessionUpdateParams,
 } from './acp-protocol';
+import { createLazyLogger } from '../utils/lazy-logger';
 
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.hermes.event-bridge');
-  return cachedLog;
-}
+const getLog = createLazyLogger('provider.hermes.event-bridge');
 
 // ─── Bridge options ─────────────────────────────────────────────────────────
 

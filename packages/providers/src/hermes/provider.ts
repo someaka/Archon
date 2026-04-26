@@ -1,7 +1,5 @@
 import { spawn } from 'child_process';
 
-import { createLogger } from '@archon/paths';
-
 import type {
   IAgentProvider,
   MessageChunk,
@@ -13,12 +11,10 @@ import { parseHermesConfig } from './config';
 import { bridgeHermesSession } from './event-bridge';
 import { resolveHermesBinary } from './binary-resolver';
 import { resolveHermesSession } from './session-resolver';
+import { createLazyLogger } from '../utils/lazy-logger';
 
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.hermes');
-  return cachedLog;
-}
+/** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
+const getLog = createLazyLogger('provider.hermes');
 
 /**
  * Hermes provider — wraps the Hermes CLI tool (invoked via

@@ -20,14 +20,10 @@ import { CODEX_CAPABILITIES } from './codex/capabilities';
 import { registerPiProvider } from './community/pi/registration';
 import { registerHermesProvider } from './hermes/registration';
 import { UnknownProviderError } from './errors';
-import { createLogger } from '@archon/paths';
+import { createLazyLogger } from './utils/lazy-logger';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.registry');
-  return cachedLog;
-}
+const getLog = createLazyLogger('provider.registry');
 
 /** Backing store for registered providers. */
 const registry = new Map<string, ProviderRegistration>();

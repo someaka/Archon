@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { createLogger } from '@archon/paths';
+import type { Api, Model } from '@mariozechner/pi-ai';
 
 import type {
   IAgentProvider,
@@ -14,6 +15,7 @@ import type {
 import { PI_CAPABILITIES } from './capabilities';
 import { parsePiConfig } from './config';
 import { parsePiModelRef } from './model-ref';
+import { createLazyLogger } from '../../utils/lazy-logger';
 
 // IMPORTANT: Do NOT add static `import { ... } from '@mariozechner/*'` here,
 // and do NOT statically import sibling modules that themselves import runtime
@@ -127,11 +129,8 @@ const PI_PROVIDER_ENV_VARS: Record<string, string> = {
   huggingface: 'HUGGINGFACE_API_KEY',
 };
 
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.pi');
-  return cachedLog;
-}
+/** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
+const getLog = createLazyLogger('provider.pi');
 
 /**
  * Append a "respond with JSON matching this schema" instruction to the user

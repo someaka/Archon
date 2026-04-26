@@ -1,15 +1,11 @@
-import { createLogger } from '@archon/paths';
 import type { AgentSession, AgentSessionEvent } from '@mariozechner/pi-coding-agent';
 import type { AssistantMessage, Usage } from '@mariozechner/pi-ai';
 
 import type { MessageChunk, TokenUsage } from '../../types';
 import { AsyncQueue, type BridgeQueueItem } from '../../utils/async-queue';
+import { createLazyLogger } from '../../utils/lazy-logger';
 
-let cachedLog: ReturnType<typeof createLogger> | undefined;
-function getLog(): ReturnType<typeof createLogger> {
-  if (!cachedLog) cachedLog = createLogger('provider.pi.event-bridge');
-  return cachedLog;
-}
+const getLog = createLazyLogger('provider.pi.event-bridge');
 
 /**
  * Serialize a tool-execution `result` payload to a stable string.
