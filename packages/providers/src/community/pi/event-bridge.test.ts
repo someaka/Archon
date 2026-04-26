@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import type { AgentSession, AgentSessionEvent } from '@mariozechner/pi-coding-agent';
 
 import {
-  AsyncQueue,
   bridgeSession,
   buildResultChunk,
   mapPiEvent,
@@ -10,6 +9,7 @@ import {
   tryParseStructuredOutput,
   usageToTokens,
 } from './event-bridge';
+import { AsyncQueue } from '../../utils/async-queue';
 
 // ─── AsyncQueue ────────────────────────────────────────────────────────────
 

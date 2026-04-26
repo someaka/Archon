@@ -66,7 +66,8 @@ export {
   resolveHermesProvider,
   resolveHermesEndpoint,
 } from './hermes/options-translator';
-export { bridgeHermesSession, AsyncQueue } from './hermes/event-bridge';
+export { bridgeHermesSession } from './hermes/event-bridge';
+export { AsyncQueue } from './utils/async-queue';
 export { resolveHermesBinary } from './hermes/binary-resolver';
 export { resolveHermesSession } from './hermes/session-resolver';
 export type { HermesModelRef } from './hermes/model-ref';

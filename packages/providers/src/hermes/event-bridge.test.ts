@@ -12,7 +12,8 @@ mock.module('@archon/paths', () => ({
   BUNDLED_IS_BINARY: false,
 }));
 
-import { AsyncQueue, bridgeHermesSession, type BridgeOptions } from './event-bridge';
+import { bridgeHermesSession, type BridgeOptions } from './event-bridge';
+import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
 import { resetAcpIdCounter } from './acp-protocol';
 import type { ChildProcess } from 'child_process';
 
