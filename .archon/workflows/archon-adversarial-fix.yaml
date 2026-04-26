@@ -1,0 +1,322 @@
+name: archon-adversarial-fix
+version: "1.0"
+description: |
+  Use when: User has an audit report with findings and wants to fix them using adversarial development.
+  Triggers: "fix this", "fix audit", "adversarial fix", "fix findings", "remediate issues",
+            "fix with review", "implement fixes", "fix and verify".
+  Does: Takes an audit report with ranked findings → designs concrete fixes adversarially
+        (Fix Designer proposes, Fix Critic attacks the proposal) → implements fixes →
+        runs validation gates (type-check, lint, tests) → Adversarial Reviewer verifies
+        the fixes don't introduce new bugs → delivers final report with fix summary.
+  NOT for: Building new apps, simple one-off fixes without review, questions about findings.
+
+  Inspired by archon-adversarial-dev's GAN-style evaluator with hard scoring,
+  adapted for remediation of existing code.
+
+provider: hermes
+model: kimi-k2.6
+
+nodes:
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 1: PARSE AUDIT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: parse-audit
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(pwd)"
+      echo "$WORKDIR" > "$ARTIFACTS_DIR/.workdir"
+
+      echo "=== Working Tree Status ==="
+      git status --short
+
+      echo ""
+      echo "=== Changed Files ==="
+      git diff --name-only HEAD
+
+      echo ""
+      echo "=== Audit Input ==="
+      if [ -n "$ARGUMENTS" ]; then
+        echo "$ARGUMENTS" | head -100
+      else
+        echo "(no audit report provided — fix working tree changes)"
+      fi
+
+      echo ""
+      echo "=== Git Log (last 3 commits) ==="
+      git log --oneline -3
+
+      echo ""
+      echo "=== Package Info ==="
+      if [ -f "package.json" ]; then
+        grep -E '"name"|"version"|"scripts"' package.json | head -6
+      fi
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 2: FIX DESIGN (adversarial — designer + critic)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: fix-designer
+    prompt: |
+      You are a Fix Designer. Your job is to read the audit findings and design concrete,
+      minimal, correct fixes for each issue.
+
+      ## Audit Findings
+      $ARGUMENTS
+
+      ## Scope
+      $parse-audit.output
+
+      ## Instructions
+
+      For EACH finding in the audit:
+      1. Read the affected file(s) using the Read tool
+      2. Design the SMALLEST possible fix that resolves the issue
+      3. Prefer surgical changes over rewrites
+      4. Ensure the fix doesn't break existing tests
+      5. If a fix requires changes to multiple files, list them all
+
+      Output your fix plan as a structured list:
+
+      ```
+      ## Fix Plan
+
+      ### Finding F-XXX — [Title]
+      - **File:** `path/to/file.ts`
+      - **Line:** N
+      - **Current code:** (brief snippet)
+      - **Proposed fix:** (exact code or clear description)
+      - **Files to change:** list all files
+      - **Tests to run:** which tests validate this fix
+      ```
+
+      Design ALL fixes before stopping. Be thorough — the critic will attack any weakness.
+    depends_on: [parse-audit]
+    context: fresh
+
+  - id: fix-critic
+    prompt: |
+      You are a Fix Critic. Your job is to ATTACK the fix designer's proposals.
+      You are not helpful. You are not generous. You are an adversary looking for
+      reasons the fixes will FAIL.
+
+      ## Fix Proposals
+      $fix-designer.output
+
+      ## Instructions
+
+      For EACH proposed fix:
+      1. Could this fix introduce a NEW bug?
+      2. Does it handle edge cases the designer missed?
+      3. Is the fix MINIMAL enough, or is it over-engineered?
+      4. Will existing tests still pass after this change?
+      5. Is there a BETTER way to fix this issue?
+      6. Does the fix follow the codebase's existing patterns?
+
+      Score each fix proposal 1-10:
+      - 9-10: Flawless. Minimal, correct, no side effects.
+      - 7-8: Good. Minor concerns but likely safe.
+      - 5-6: Risky. May introduce side effects or miss edge cases.
+      - 3-4: Poor. Likely to break something.
+      - 1-2: Dangerous. Will cause crashes or data loss.
+
+      Any fix scoring below 7 must be REDESIGNED. List specific improvements needed.
+
+      Output your critique as a structured report.
+    depends_on: [fix-designer]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 3: IMPLEMENTATION
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: implement-fixes
+    prompt: |
+      You are a Fix Implementer. Your job is to apply the approved fixes to the codebase.
+
+      ## Fix Proposals
+      $fix-designer.output
+
+      ## Critic's Review
+      $fix-critic.output
+
+      ## Instructions
+
+      1. Read the critic's scores. Only implement fixes scoring >= 7.
+      2. For fixes scoring < 7: redesign them per the critic's feedback, THEN implement.
+      3. Apply fixes ONE AT A TIME using the Write/Edit tools.
+      4. After EACH fix, run the relevant tests to verify:
+         ```bash
+         bun test packages/providers/src/hermes/
+         ```
+      5. If a test fails, UNDO the fix and redesign.
+      6. Commit each working fix:
+         ```bash
+         git add -A && git commit -m "fix(hermes): F-XXX — description"
+         ```
+
+      Be surgical. Change ONLY what's necessary. Do not refactor unrelated code.
+    depends_on: [fix-critic]
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 4: VALIDATION GATES
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: type-check
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== TypeScript Type Check ==="
+      if bun run type-check 2>&1; then
+        echo "PASS: type-check"
+        exit 0
+      else
+        echo "FAIL: type-check"
+        exit 0
+      fi
+    depends_on: [implement-fixes]
+    timeout: 120000
+
+  - id: lint-check
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== ESLint ==="
+      NODE_OPTIONS="--max-old-space-size=4096" bun run lint --max-warnings 0 2>&1 || true
+      echo "DONE: lint"
+      exit 0
+    depends_on: [implement-fixes]
+    timeout: 120000
+
+  - id: test-gates
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== Hermes Provider Tests ==="
+      bun test packages/providers/src/hermes/ 2>&1 || true
+
+      echo ""
+      echo "=== Full Test Suite ==="
+      bun run test 2>&1 || true
+      echo "DONE: tests"
+      exit 0
+    depends_on: [implement-fixes]
+    timeout: 300000
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 5: ADVERSARIAL REVIEW
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: adversarial-review
+    prompt: |
+      You are an ADVERSARIAL REVIEWER. Your job is to VERIFY that the implemented fixes
+      are correct and did NOT introduce new bugs.
+
+      ## Original Audit Findings
+      $ARGUMENTS
+
+      ## Fix Proposals
+      $fix-designer.output
+
+      ## Critic's Review
+      $fix-critic.output
+
+      ## Validation Gate Results
+      ### Type Check
+      $type-check.output
+
+      ### Lint Check
+      $lint-check.output
+
+      ### Test Gates
+      $test-gates.output
+
+      ## Instructions
+
+      1. Read the FIXED files using the Read tool. Compare before/after.
+      2. For EACH original finding:
+         - Is the fix actually applied?
+         - Does the fix resolve the root cause?
+         - Did the fix introduce ANY new issues?
+      3. Check for common post-fix bugs:
+         - Off-by-one errors
+         - Missing error handling
+         - Broken imports or types
+         - Test regressions
+      4. Score each fix 1-10:
+         - 9-10: Perfect fix. No side effects.
+         - 7-8: Good fix. Minor nitpicks.
+         - 5-6: Fix works but has risks.
+         - 3-4: Fix incomplete or wrong.
+         - 1-2: Fix broke something.
+
+      Any fix scoring below 7 must be REVERTED and REDONE.
+
+      Output a structured verdict report.
+    depends_on: [type-check, lint-check, test-gates]
+    trigger_rule: all_done
+    context: fresh
+
+  # ═══════════════════════════════════════════════════════════════════
+  # PHASE 6: FINAL REPORT
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: final-report
+    prompt: |
+      You are a Fix Reporter. Deliver the final summary to the user.
+
+      ## Original Audit
+      $ARGUMENTS
+
+      ## Fix Design
+      $fix-designer.output
+
+      ## Critic's Review
+      $fix-critic.output
+
+      ## Implementation
+      $implement-fixes.output
+
+      ## Validation Gates
+      ### Type Check
+      $type-check.output
+      ### Lint
+      $lint-check.output
+      ### Tests
+      $test-gates.output
+
+      ## Adversarial Review
+      $adversarial-review.output
+
+      ## Instructions
+
+      Produce a clean, scannable report:
+
+      1. **Summary**: How many findings were fixed, how many remain
+      2. **Per-Finding Status**: For each F-XXX:
+         - Status: FIXED / PARTIAL / NOT FIXED
+         - Score: X/10
+         - Files changed
+         - Any remaining issues
+      3. **Gate Results**: type-check, lint, tests — PASS/FAIL
+      4. **New Issues Introduced**: Any bugs the adversarial reviewer found
+      5. **Next Steps**: What still needs to be done
+
+      Format with headers, bullet points, and code blocks.
+    depends_on: [adversarial-review]
+    context: fresh

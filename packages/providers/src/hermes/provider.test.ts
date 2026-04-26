@@ -333,7 +333,7 @@ describe('HermesProvider', () => {
     expect(caps.sessionResume).toBe(false);
     expect(caps.mcp).toBe(false);
     expect(caps.hooks).toBe(false);
-    expect(caps.skills).toBe(true);
+    expect(caps.skills).toBe(false);
     expect(caps.agents).toBe(false);
     expect(caps.toolRestrictions).toBe(false);
     expect(caps.structuredOutput).toBe(false);
@@ -341,7 +341,7 @@ describe('HermesProvider', () => {
     expect(caps.costControl).toBe(false);
     expect(caps.effortControl).toBe(false);
     expect(caps.thinkingControl).toBe(false);
-    expect(caps.fallbackModel).toBe(true);
+    expect(caps.fallbackModel).toBe(false);
     expect(caps.sandbox).toBe(false);
   });
 });
