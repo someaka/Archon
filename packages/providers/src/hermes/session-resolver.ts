@@ -50,7 +50,9 @@ export function resolveHermesSession(options: {
   const cwd = rawCwd && rawCwd.length > 0 ? rawCwd : process.cwd();
 
   // Merge environment: process.env is the baseline, caller-provided env overrides.
-  const env: Record<string, string> = { ...process.env } as Record<string, string>;
+  const env: Record<string, string> = Object.fromEntries(
+    Object.entries(process.env).filter(([, v]): v is string => typeof v === 'string')
+  );
   if (providedEnv) {
     for (const [key, value] of Object.entries(providedEnv)) {
       if (typeof value === 'string') {
