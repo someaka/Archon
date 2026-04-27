@@ -10,6 +10,7 @@ import {
   createRequest,
   createAcpIdGenerator,
   isSessionUpdateParams,
+  isToolCallUpdate,
   parseMessage,
   serializeMessage,
   type ContentBlock,
@@ -171,9 +172,39 @@ export async function* bridgeHermesSession(
               kind: 'chunk',
               chunk: { type: 'thinking', content: update.content.text },
             });
+          } else if (isToolCallUpdate(update)) {
+            if (update.status === 'running') {
+              queue.push({
+                kind: 'chunk',
+                chunk: {
+                  type: 'tool',
+                  toolName: update.title || 'unknown',
+                  toolInput: update.rawInput,
+                  toolCallId: update.toolCallId,
+                },
+              });
+            } else if (update.status === 'completed' || update.status === 'failed') {
+              // rawOutput is object per ACP spec; stringify for toolOutput which is string
+              const output = update.rawOutput
+                ? JSON.stringify(update.rawOutput)
+                : (update.content?.map(c => c.text ?? '').join('') ?? '');
+              queue.push({
+                kind: 'chunk',
+                chunk: {
+                  type: 'tool_result',
+                  toolName: update.title || 'unknown',
+                  toolOutput: output,
+                  toolCallId: update.toolCallId,
+                },
+              });
+            }
+            // status='pending' → no-op (tool not yet executing)
           } else {
+            // Unrecognized session/update type.
+            // Known unhandled: 'usage_update' (Draft-stage RFD, not stable protocol).
+            // See acp-protocol.ts UsageUpdate for details.
             getLog().debug(
-              { sessionUpdate: (update as Record<string, unknown>).sessionUpdate },
+              { sessionUpdate: (update as unknown as Record<string, unknown>).sessionUpdate },
               'acp.unrecognized_session_update'
             );
           }

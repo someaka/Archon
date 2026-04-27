@@ -169,7 +169,59 @@ export interface AgentThoughtChunkUpdate {
   content: TextContentBlock;
 }
 
-export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpdate;
+/** ACP ToolKind — category of tool being invoked. */
+export type ToolKind =
+  | 'read'
+  | 'edit'
+  | 'delete'
+  | 'move'
+  | 'search'
+  | 'execute'
+  | 'think'
+  | 'fetch'
+  | 'other';
+
+/** ACP ToolCallStatus — execution status of a tool call. */
+export type ToolCallStatus = 'pending' | 'running' | 'completed' | 'failed';
+
+/**
+ * A tool call event pushed via `session/update`.
+ * Covers both `tool_call` (creation) and `tool_call_update` (progress).
+ * Both use the same shape per ACP spec.
+ */
+export interface ToolCallUpdate {
+  sessionUpdate: 'tool_call' | 'tool_call_update';
+  toolCallId: string;
+  kind: ToolKind;
+  title: string;
+  status: ToolCallStatus;
+  content?: { type: string; text?: string; [key: string]: unknown }[];
+  rawInput?: Record<string, unknown>;
+  rawOutput?: Record<string, unknown>;
+  locations?: { path: string; line?: number }[];
+}
+
+/**
+ * ACP usage_update — Draft-stage RFD. Session-level context window + cost update.
+ *
+ * ⚠️ DRAFT: This type is from ACP's Draft RFD, not stable protocol.
+ * Do NOT rely on this shape — it may change or be removed.
+ *
+ * NOTE: Per-token usage (inputTokens/outputTokens) belongs in the PromptResponse
+ * (per-turn), NOT in session/update notifications. This type tracks session-level
+ * aggregated usage, not per-turn token counts.
+ *
+ * Currently NOT added to isSessionUpdateParams — events with this type
+ * will hit the unrecognized_session_update debug log in event-bridge.
+ */
+export interface UsageUpdate {
+  sessionUpdate: 'usage_update';
+  contextWindowUsed?: number;
+  contextWindowMax?: number;
+  costUsd?: number;
+}
+
+export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpdate | ToolCallUpdate;
 
 /** The params payload of a `session/update` notification. */
 export interface SessionUpdateParams {
@@ -193,6 +245,14 @@ export function isSessionUpdateParams(obj: unknown): obj is SessionUpdateParams 
   const update = record.update as Record<string, unknown>;
   if (typeof update.sessionUpdate !== 'string') return false;
   return (
-    update.sessionUpdate === 'agent_message_chunk' || update.sessionUpdate === 'agent_thought_chunk'
+    update.sessionUpdate === 'agent_message_chunk' ||
+    update.sessionUpdate === 'agent_thought_chunk' ||
+    update.sessionUpdate === 'tool_call' ||
+    update.sessionUpdate === 'tool_call_update'
   );
+}
+
+/** Type guard for `ToolCallUpdate` events. */
+export function isToolCallUpdate(update: SessionUpdateUnion): update is ToolCallUpdate {
+  return update.sessionUpdate === 'tool_call' || update.sessionUpdate === 'tool_call_update';
 }
