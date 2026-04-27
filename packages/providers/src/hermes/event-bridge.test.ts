@@ -66,10 +66,22 @@ interface AcpMock {
 function createAcpMock(
   options: {
     /** Custom updates to stream before the prompt response. */
-    updates?: Array<{
-      sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
-      text: string;
-    }>;
+    updates?: Array<
+      | {
+          sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+          text: string;
+        }
+      | {
+          sessionUpdate: 'tool_call' | 'tool_call_update';
+          toolCallId: string;
+          kind: string;
+          title: string;
+          status: string;
+          content?: Array<{ type: string; text: string }>;
+          rawInput?: Record<string, unknown>;
+          rawOutput?: Record<string, unknown>;
+        }
+    >;
     /** Stop reason for the prompt response. */
     stopReason?: string;
     /** Custom session id. */
@@ -79,10 +91,19 @@ function createAcpMock(
   const sessionId = options.sessionId ?? 'test-session';
   const updates =
     options.updates ??
-    ([{ sessionUpdate: 'agent_message_chunk' as const, text: 'Hello, world!' }] as Array<{
-      sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
-      text: string;
-    }>);
+    ([{ sessionUpdate: 'agent_message_chunk' as const, text: 'Hello, world!' }] as Array<
+      | { sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk'; text: string }
+      | {
+          sessionUpdate: 'tool_call' | 'tool_call_update';
+          toolCallId: string;
+          kind: string;
+          title: string;
+          status: string;
+          content?: Array<{ type: string; text: string }>;
+          rawInput?: Record<string, unknown>;
+          rawOutput?: Record<string, unknown>;
+        }
+    >);
   const stopReason = options.stopReason ?? 'end_turn';
 
   const stdout = new Readable({ read() {} });
@@ -125,16 +146,39 @@ function createAcpMock(
         } else if (req.method === 'session/prompt') {
           // Stream session/update notifications first
           for (const update of updates) {
+            // Tool events have a different shape than message/thought chunks
+            let updateObj: Record<string, unknown>;
+            if (
+              update.sessionUpdate === 'tool_call' ||
+              update.sessionUpdate === 'tool_call_update'
+            ) {
+              updateObj = {
+                sessionUpdate: update.sessionUpdate,
+                toolCallId: update.toolCallId,
+                kind: update.kind,
+                title: update.title,
+                status: update.status,
+                ...(update.content !== undefined && { content: update.content }),
+                ...(update.rawInput !== undefined && { rawInput: update.rawInput }),
+                ...(update.rawOutput !== undefined && { rawOutput: update.rawOutput }),
+              };
+            } else {
+              const msgUpdate = update as {
+                sessionUpdate: 'agent_message_chunk' | 'agent_thought_chunk';
+                text: string;
+              };
+              updateObj = {
+                sessionUpdate: msgUpdate.sessionUpdate,
+                content: { type: 'text', text: msgUpdate.text },
+              };
+            }
             stdout.push(
               JSON.stringify({
                 jsonrpc: '2.0',
                 method: 'session/update',
                 params: {
                   sessionId,
-                  update: {
-                    sessionUpdate: update.sessionUpdate,
-                    content: { type: 'text', text: update.text },
-                  },
+                  update: updateObj,
                 },
               }) + '\n'
             );
@@ -355,6 +399,136 @@ describe('bridgeHermesSession', () => {
     expect(assistant).toHaveLength(1);
     expect(thinking[0]).toMatchObject({ content: 'Hmm...' });
     expect(assistant[0]).toMatchObject({ content: 'Here is the answer.' });
+  });
+
+  // ── Tool events ────────────────────────────────────────────────────────
+
+  test('tool_call_update with status running emits tool chunk', async () => {
+    const mock = createAcpMock({
+      updates: [
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-1',
+          kind: 'execute',
+          title: 'bash',
+          status: 'running',
+          rawInput: { command: 'ls -la' },
+        },
+      ],
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const toolChunks = chunks.filter(c => (c as { type: string }).type === 'tool');
+    expect(toolChunks).toHaveLength(1);
+    expect(toolChunks[0]).toMatchObject({
+      type: 'tool',
+      toolName: 'bash',
+      toolInput: { command: 'ls -la' },
+      toolCallId: 'tc-1',
+    });
+  });
+
+  test('tool_call_update with status completed emits tool_result chunk', async () => {
+    const mock = createAcpMock({
+      updates: [
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-2',
+          kind: 'execute',
+          title: 'bash',
+          status: 'completed',
+          rawOutput: { stdout: 'file.txt', exitCode: 0 },
+        },
+      ],
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const toolResultChunks = chunks.filter(c => (c as { type: string }).type === 'tool_result');
+    expect(toolResultChunks).toHaveLength(1);
+    expect(toolResultChunks[0]).toMatchObject({
+      type: 'tool_result',
+      toolName: 'bash',
+      toolOutput: '{"stdout":"file.txt","exitCode":0}',
+      toolCallId: 'tc-2',
+    });
+  });
+
+  test('tool_call_update with status failed emits tool_result with error', async () => {
+    const mock = createAcpMock({
+      updates: [
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-3',
+          kind: 'execute',
+          title: 'bash',
+          status: 'failed',
+          rawOutput: { error: 'command not found', exitCode: 127 },
+        },
+      ],
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const toolResultChunks = chunks.filter(c => (c as { type: string }).type === 'tool_result');
+    expect(toolResultChunks).toHaveLength(1);
+    expect(toolResultChunks[0]).toMatchObject({
+      type: 'tool_result',
+      toolName: 'bash',
+      toolOutput: '{"error":"command not found","exitCode":127}',
+      toolCallId: 'tc-3',
+    });
+  });
+
+  test('tool_call with status pending is ignored (no chunk emitted)', async () => {
+    const mock = createAcpMock({
+      updates: [
+        {
+          sessionUpdate: 'tool_call',
+          toolCallId: 'tc-4',
+          kind: 'execute',
+          title: 'bash',
+          status: 'pending',
+        },
+      ],
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const toolChunks = chunks.filter(
+      c => (c as { type: string }).type === 'tool' || (c as { type: string }).type === 'tool_result'
+    );
+    expect(toolChunks).toHaveLength(0);
+    // Should still have result chunk
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+  });
+
+  test('tool_call_update with unknown kind still emits tool chunk', async () => {
+    const mock = createAcpMock({
+      updates: [
+        {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tc-5',
+          kind: 'unknown_special',
+          title: 'custom-tool',
+          status: 'running',
+          rawInput: { query: 'test' },
+        },
+      ],
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const toolChunks = chunks.filter(c => (c as { type: string }).type === 'tool');
+    expect(toolChunks).toHaveLength(1);
+    expect(toolChunks[0]).toMatchObject({
+      type: 'tool',
+      toolName: 'custom-tool',
+      toolInput: { query: 'test' },
+      toolCallId: 'tc-5',
+    });
   });
 
   // ── Result chunk ────────────────────────────────────────────────────────
