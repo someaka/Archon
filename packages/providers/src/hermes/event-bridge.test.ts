@@ -88,6 +88,8 @@ function createAcpMock(
     sessionId?: string;
     /** Custom initialize result (merged with defaults). */
     initResult?: Record<string, unknown>;
+    /** Usage data to include in the prompt response result. */
+    usage?: Record<string, unknown>;
   } = {}
 ): AcpMock {
   const sessionId = options.sessionId ?? 'test-session';
@@ -192,11 +194,13 @@ function createAcpMock(
             );
           }
           // Then the prompt response
+          const result: Record<string, unknown> = { stopReason };
+          if (options.usage) result.usage = options.usage;
           stdout.push(
             JSON.stringify({
               jsonrpc: '2.0',
               id: req.id,
-              result: { stopReason },
+              result,
             }) + '\n'
           );
         }
@@ -553,6 +557,45 @@ describe('bridgeHermesSession', () => {
       sessionId: 'test-session',
       stopReason: 'end_turn',
     });
+  });
+
+  // ── Usage extraction ──────────────────────────────────────────────────
+
+  test('PromptResponse with usage data → result chunk has tokens', async () => {
+    const mock = createAcpMock({
+      usage: { inputTokens: 100, outputTokens: 50, totalTokens: 150 },
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).toMatchObject({
+      type: 'result',
+      tokens: { input: 100, output: 50, total: 150 },
+    });
+  });
+
+  test('PromptResponse with no usage → result chunk has no tokens', async () => {
+    const mock = createAcpMock();
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).not.toHaveProperty('tokens');
+  });
+
+  test('PromptResponse with partial usage (only inputTokens) → no tokens', async () => {
+    const mock = createAcpMock({
+      usage: { inputTokens: 100 },
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).not.toHaveProperty('tokens');
   });
 
   // ── Empty stream ────────────────────────────────────────────────────────
