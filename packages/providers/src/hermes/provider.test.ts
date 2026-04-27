@@ -38,6 +38,12 @@ mock.module('./binary-resolver', () => ({
   INSTALL_INSTRUCTIONS: '',
 }));
 
+// ─── Mock hermes-mcp-reader so sendQuery doesn't hit the real filesystem ───
+
+mock.module('./hermes-mcp-reader', () => ({
+  readHermesMcpConfig: mock(async () => []),
+}));
+
 // Import AFTER mocks are set — module resolution freezes the mocks.
 import { HermesProvider, getFirstEventTimeoutMs } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
@@ -383,7 +389,7 @@ describe('HermesProvider', () => {
   test('capabilities reflect v1 Hermes wiring', () => {
     const caps = new HermesProvider().getCapabilities();
     expect(caps.sessionResume).toBe(false);
-    expect(caps.mcp).toBe(false);
+    expect(caps.mcp).toBe(true);
     expect(caps.hooks).toBe(false);
     expect(caps.skills).toBe(false);
     expect(caps.agents).toBe(false);

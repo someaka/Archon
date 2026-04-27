@@ -23,7 +23,7 @@ import type { ProviderCapabilities } from '../types';
  */
 export const HERMES_CAPABILITIES: ProviderCapabilities = {
   sessionResume: false,
-  mcp: false,
+  mcp: true,
   hooks: false,
   skills: false,
   agents: false,

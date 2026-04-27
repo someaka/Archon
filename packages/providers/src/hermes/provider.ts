@@ -16,6 +16,7 @@ import { resolveHermesBinary, verifyHermesBinary, INSTALL_INSTRUCTIONS } from '.
 import { resolveHermesSession } from './session-resolver';
 import { createLazyLogger } from '../utils/lazy-logger';
 import { withFirstEventTimeout } from './timeout-utils';
+import { readHermesMcpConfig } from './hermes-mcp-reader';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 const getLog = createLazyLogger('provider.hermes');
@@ -165,6 +166,9 @@ export class HermesProvider implements IAgentProvider {
       );
     }
 
+    // 3c. Read MCP server config from ~/.hermes/config.yaml (before spawn so
+    // the await doesn't create a microtask gap between spawn and bridge setup).
+    const mcpServers = await readHermesMcpConfig();
     getLog().debug(
       {
         hermesBinary,
@@ -173,14 +177,12 @@ export class HermesProvider implements IAgentProvider {
       },
       'hermes.spawning_acp'
     );
-
     // 4. Spawn `hermes acp` with piped stdio.
     const child = spawn(hermesBinary, ['acp'], {
       cwd: session.cwd,
       env: { ...session.env, ...modelEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-
     // 5. Bridge the ACP session — yield all chunks from the child process.
     const bridge = bridgeHermesSession(
       child,
@@ -188,6 +190,7 @@ export class HermesProvider implements IAgentProvider {
         prompt,
         cwd: session.cwd,
         systemPrompt: options?.systemPrompt,
+        mcpServers,
       },
       options?.abortSignal
     );
