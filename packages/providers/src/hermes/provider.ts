@@ -203,7 +203,7 @@ export class HermesProvider implements IAgentProvider {
       throw err;
     } finally {
       // Ensure bridge cleanup runs (SIGKILL child process) even on timeout
-      void bridge.return(undefined as unknown as IteratorResult<MessageChunk>);
+      void bridge.return(undefined);
       // Clean up temp HERMES_HOME directory to prevent leaks
       if (tempHermesHome) {
         try {
