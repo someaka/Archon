@@ -585,19 +585,21 @@ See [hermes-multi-model.yaml](../examples/hermes-multi-model.yaml) for a standal
 |---|---|---|
 | Multi-provider (15+ LLM backends) | ✅ | `provider:` per node or in config |
 | Session resume | ❌ | Hermes is stateless per invocation |
-| Tool restrictions | ✅ | `allowed_tools` / `denied_tools` (read, write, bash, grep, glob, edit) |
-| Thinking level | ✅ | `effort: low\|medium\|high` |
-| Skills | ✅ | `skills: [name]` (from `~/.hermes/skills/`) |
+| Tool restrictions | ❌ | not wired up in provider |
+| Thinking level | ❌ | not wired up in provider |
+| Skills | ❌ | not wired up in provider |
 | Inline sub-agents | ❌ | not supported |
 | System prompt override | ✅ | `systemPrompt:` |
-| MCP servers | ✅ | Hermes has native MCP support |
+| MCP servers | ❌ | not wired up in provider |
 | Codebase env vars (`envInjection`) | ✅ | `.archon/config.yaml` `env:` section |
 | Custom endpoints (Ollama, LM Studio) | ✅ | `endpoint:` field |
 | Global auth via `hermes login` | ✅ | `globalAuth: true` |
-| Structured output | ✅ (best-effort) | `output_format:` — JSON parsed from response text |
+| Structured output | ❌ | not wired up in provider |
 | Cost limits (`maxBudgetUsd`) | ❌ | tracked in result chunk, not enforced |
 | Fallback model | ❌ | not native |
 | Sandbox | ❌ | not native |
+
+> **Note:** Several capabilities (MCP, Skills, Tool restrictions, Thinking level, Structured output) are listed as unsupported because `capabilities.ts` declares them `false`. Hermes Agent itself may support these features directly, but the Archon provider integration has not wired them up yet — the dag-executor uses these flags to warn when a workflow node relies on an unimplemented feature.
 
 ### Set as Default
 
