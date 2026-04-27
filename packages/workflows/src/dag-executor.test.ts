@@ -6936,3 +6936,254 @@ describe('executeDagWorkflow -- final status derivation', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Cross-provider node resolution (Issue #1106: claude -> hermes mid-workflow)
+// ---------------------------------------------------------------------------
+
+describe('executeDagWorkflow -- cross-provider resolution', () => {
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = join(
+      tmpdir(),
+      `dag-cross-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    const commandsDir = join(testDir, '.archon', 'commands');
+    await mkdir(commandsDir, { recursive: true });
+    await writeFile(join(commandsDir, 'my-cmd.md'), 'My command prompt for $USER_MESSAGE');
+  });
+
+  afterEach(async () => {
+    // Restore default claude client
+    mockGetAgentProviderDag.mockImplementation(() => ({
+      sendQuery: mockSendQueryDag,
+      getType: () => 'claude',
+      getCapabilities: mockClaudeCapabilities,
+    }));
+    try {
+      await rm(testDir, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup errors
+    }
+  });
+
+  it('node provider=hermes overrides workflow provider=claude', async () => {
+    // Separate sendQuery mocks per provider so we can track which was called
+    const claudeSendQuery = mock(function* () {
+      yield { type: 'assistant', content: 'Claude response' };
+      yield { type: 'result', sessionId: 'claude-session' };
+    });
+    const hermesSendQuery = mock(function* () {
+      yield { type: 'assistant', content: 'Hermes response' };
+      yield { type: 'result', sessionId: 'hermes-session' };
+    });
+
+    const mockHermesCapabilities = () => ({
+      sessionResume: false,
+      mcp: false,
+      hooks: false,
+      skills: false,
+      agents: false,
+      toolRestrictions: false,
+      structuredOutput: false,
+      envInjection: true,
+      costControl: false,
+      effortControl: false,
+      thinkingControl: false,
+      fallbackModel: false,
+      sandbox: false,
+    });
+
+    // getAgentProvider returns different mocks based on provider type
+    mockGetAgentProviderDag.mockImplementation((provider: string) => {
+      if (provider === 'hermes') {
+        return {
+          sendQuery: hermesSendQuery,
+          getType: () => 'hermes',
+          getCapabilities: mockHermesCapabilities,
+        };
+      }
+      return {
+        sendQuery: claudeSendQuery,
+        getType: () => 'claude',
+        getCapabilities: mockClaudeCapabilities,
+      };
+    });
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'cross-provider-test',
+        nodes: [{ id: 'hermes-node', command: 'my-cmd', provider: 'hermes' }],
+      },
+      workflowRun,
+      'claude', // workflow provider
+      'claude-sonnet-4-20250514', // workflow model
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // Hermes sendQuery was called (not skipped)
+    expect(hermesSendQuery.mock.calls.length).toBeGreaterThan(0);
+    // Claude sendQuery was NOT called for this node
+    expect(claudeSendQuery.mock.calls.length).toBe(0);
+  });
+
+  it('node provider=hermes resolves hermes model (not workflow model)', async () => {
+    const hermesSendQuery = mock(function* () {
+      yield { type: 'assistant', content: 'Hermes response' };
+      yield { type: 'result', sessionId: 'hermes-session' };
+    });
+
+    const mockHermesCapabilities = () => ({
+      sessionResume: false,
+      mcp: false,
+      hooks: false,
+      skills: false,
+      agents: false,
+      toolRestrictions: false,
+      structuredOutput: false,
+      envInjection: true,
+      costControl: false,
+      effortControl: false,
+      thinkingControl: false,
+      fallbackModel: false,
+      sandbox: false,
+    });
+
+    mockGetAgentProviderDag.mockImplementation((provider: string) => {
+      if (provider === 'hermes') {
+        return {
+          sendQuery: hermesSendQuery,
+          getType: () => 'hermes',
+          getCapabilities: mockHermesCapabilities,
+        };
+      }
+      return {
+        sendQuery: mockSendQueryDag,
+        getType: () => 'claude',
+        getCapabilities: mockClaudeCapabilities,
+      };
+    });
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    // Node specifies a hermes model explicitly
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'cross-provider-model-test',
+        nodes: [
+          {
+            id: 'hermes-node',
+            command: 'my-cmd',
+            provider: 'hermes',
+            model: 'hermes:ollama/llama3.1',
+          },
+        ],
+      },
+      workflowRun,
+      'claude',
+      'claude-sonnet-4-20250514', // workflow model — should NOT be used
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      { ...minimalConfig, assistants: { claude: {}, codex: {}, hermes: {} } }
+    );
+
+    expect(hermesSendQuery.mock.calls.length).toBeGreaterThan(0);
+    const optionsArg = hermesSendQuery.mock.calls[0][3] as Record<string, unknown>;
+    // Model in options should be the node's hermes model, not the workflow model
+    expect(optionsArg?.model).toBe('hermes:ollama/llama3.1');
+  });
+
+  it('multi-node workflow: claude node + hermes node in separate layers', async () => {
+    const claudeSendQuery = mock(function* () {
+      yield { type: 'assistant', content: 'Claude response' };
+      yield { type: 'result', sessionId: 'claude-session' };
+    });
+    const hermesSendQuery = mock(function* () {
+      yield { type: 'assistant', content: 'Hermes response' };
+      yield { type: 'result', sessionId: 'hermes-session' };
+    });
+
+    const mockHermesCapabilities = () => ({
+      sessionResume: false,
+      mcp: false,
+      hooks: false,
+      skills: false,
+      agents: false,
+      toolRestrictions: false,
+      structuredOutput: false,
+      envInjection: true,
+      costControl: false,
+      effortControl: false,
+      thinkingControl: false,
+      fallbackModel: false,
+      sandbox: false,
+    });
+
+    mockGetAgentProviderDag.mockImplementation((provider: string) => {
+      if (provider === 'hermes') {
+        return {
+          sendQuery: hermesSendQuery,
+          getType: () => 'hermes',
+          getCapabilities: mockHermesCapabilities,
+        };
+      }
+      return {
+        sendQuery: claudeSendQuery,
+        getType: () => 'claude',
+        getCapabilities: mockClaudeCapabilities,
+      };
+    });
+
+    const mockDeps = createMockDeps();
+    const platform = createMockPlatform();
+    const workflowRun = makeWorkflowRun();
+
+    await executeDagWorkflow(
+      mockDeps,
+      platform,
+      'conv-dag',
+      testDir,
+      {
+        name: 'multi-provider-workflow',
+        nodes: [
+          { id: 'plan', command: 'my-cmd' }, // claude (workflow default)
+          { id: 'execute', command: 'my-cmd', provider: 'hermes', depends_on: ['plan'] }, // hermes override
+        ],
+      },
+      workflowRun,
+      'claude',
+      undefined,
+      join(testDir, 'artifacts'),
+      join(testDir, 'logs'),
+      'main',
+      'docs/',
+      minimalConfig
+    );
+
+    // Claude was called for the 'plan' node
+    expect(claudeSendQuery.mock.calls.length).toBe(1);
+    // Hermes was called for the 'execute' node
+    expect(hermesSendQuery.mock.calls.length).toBe(1);
+  });
+});
