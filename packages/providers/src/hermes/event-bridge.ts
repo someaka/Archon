@@ -24,6 +24,14 @@ const getLog = createLazyLogger('provider.hermes.event-bridge');
 
 // ─── ACP usage normalization ──────────────────────────────────────────────
 
+/** ACP MCP server entry for session/new passthrough. */
+export interface AcpMcpServer {
+  name: string;
+  command: string;
+  args?: string[];
+  env?: string[];
+}
+
 export function normalizeAcpUsage(usage: Record<string, unknown>): TokenUsage | undefined {
   const input = usage.inputTokens;
   const output = usage.outputTokens;
@@ -58,6 +66,7 @@ export interface BridgeOptions {
   prompt: string;
   cwd: string;
   systemPrompt?: string;
+  mcpServers?: AcpMcpServer[];
 }
 
 // ─── bridgeHermesSession (ACP JSON-RPC 2.0) ────────────────────────────────
@@ -461,7 +470,7 @@ export async function* bridgeHermesSession(
       ACP_METHODS.sessionNew,
       {
         cwd: options.cwd,
-        mcpServers: [], // required by ACP schema; mcp capability is false so no servers are configured
+        mcpServers: options.mcpServers ?? [], // passed through from caller; empty by default
       },
       idGen
     );
