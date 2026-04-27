@@ -991,6 +991,138 @@ describe('bridgeHermesSession', () => {
     expect(closeMsg.id).toBeUndefined();
   });
 
+  // ── skipInit mode ──────────────────────────────────────────────────────
+
+  test('skipInit mode sends only session/prompt, not initialize or session/new', async () => {
+    const stdinWrites: string[] = [];
+    const mock = createAcpMock();
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      stdinWrites.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return originalWrite(chunk, ...args);
+    };
+
+    await consume(
+      bridgeHermesSession(
+        mock.process,
+        makeBridgeOptions({
+          prompt: 'test',
+          skipInit: true,
+          existingSessionId: 'existing-123',
+          keepAlive: true,
+        })
+      )
+    );
+
+    const methods = stdinWrites
+      .map(w => {
+        try {
+          return JSON.parse(w.trim()).method;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    expect(methods).toContain('session/prompt');
+    expect(methods).not.toContain('initialize');
+    expect(methods).not.toContain('session/new');
+  });
+
+  test('skipInit without existingSessionId emits error result', async () => {
+    const mock = createAcpMock();
+    const { chunks } = await consume(
+      bridgeHermesSession(
+        mock.process,
+        makeBridgeOptions({
+          prompt: 'test',
+          skipInit: true,
+          // no existingSessionId
+        })
+      )
+    );
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks.length).toBeGreaterThan(0);
+    const lastResult = resultChunks[resultChunks.length - 1] as Record<string, unknown>;
+    expect(lastResult.isError).toBe(true);
+    expect(lastResult.errors).toBeDefined();
+    expect((lastResult.errors as string[])[0]).toContain('existingSessionId');
+  });
+
+  test('skipInit mode does not send session/close or kill process', async () => {
+    const stdinWrites: string[] = [];
+    const mock = createAcpMock();
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      stdinWrites.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return originalWrite(chunk, ...args);
+    };
+
+    await consume(
+      bridgeHermesSession(
+        mock.process,
+        makeBridgeOptions({
+          prompt: 'test',
+          skipInit: true,
+          existingSessionId: 'existing-123',
+          keepAlive: true,
+        })
+      )
+    );
+
+    const methods = stdinWrites
+      .map(w => {
+        try {
+          return JSON.parse(w.trim()).method;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    expect(methods).not.toContain('session/close');
+    // Process should not be killed (kill is a mock, so check if it was called)
+    expect(mock.process.killed).toBe(false);
+  });
+
+  // ── errorSubtype ──────────────────────────────────────────────────────
+
+  test('error result chunk includes errorSubtype for non-zero exit', async () => {
+    const mock = createAcpMock({ updates: [] });
+
+    const consumePromise = consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    queueMicrotask(() => {
+      mock.process.emit('exit', 1, null);
+    });
+
+    const { chunks } = await consumePromise;
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks.length).toBeGreaterThan(0);
+    const lastResult = resultChunks[resultChunks.length - 1] as Record<string, unknown>;
+    expect(lastResult.isError).toBe(true);
+    expect(lastResult.errorSubtype).toBeDefined();
+    expect(typeof lastResult.errorSubtype).toBe('string');
+  });
+
+  test('error result chunk includes errorSubtype for abort', async () => {
+    const controller = new AbortController();
+    const mock = createAcpMock({ updates: [] });
+    controller.abort();
+
+    const { chunks } = await consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal)
+    );
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks.length).toBeGreaterThan(0);
+    const result = resultChunks[0] as Record<string, unknown>;
+    expect(result.isError).toBe(true);
+    expect(result.errorSubtype).toBeDefined();
+    expect(typeof result.errorSubtype).toBe('string');
+  });
+
   test('initialize response parses agentCapabilities and agentInfo', async () => {
     const mock = createAcpMock({
       initResult: {
@@ -1083,5 +1215,11 @@ describe('redactSecrets', () => {
     expect(result).toContain('key=[REDACTED]');
     expect(result).toContain('token=[REDACTED]');
     expect(result).toContain('normal');
+  });
+
+  test('redacts secret at end of line with no trailing content', () => {
+    const result = redactSecrets('OPENAI_API_KEY=sk-abc123');
+    expect(result).toContain('[REDACTED]');
+    expect(result).not.toContain('sk-abc123');
   });
 });
