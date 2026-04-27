@@ -22,7 +22,7 @@ Local development with SQLite is the recommended default. No database setup is n
 ### Prerequisites
 
 - [Bun](https://bun.sh) 1.0+
-- At least one AI assistant installed and configured (Claude Code or Codex — Archon orchestrates them, it does not bundle them)
+- At least one AI assistant installed and configured (Claude Code, Codex, or Hermes Agent — Archon orchestrates them, it does not bundle them)
 - A GitHub token for repository cloning (`GH_TOKEN` / `GITHUB_TOKEN`)
 
 > Source installs (`bun run`) auto-resolve Claude Code's `cli.js` via `node_modules`. Compiled Archon binaries require `CLAUDE_BIN_PATH` or `assistants.claude.claudeBinaryPath` — see [AI Assistants → Binary path configuration](/getting-started/ai-assistants/#binary-path-configuration-compiled-binaries-only).
@@ -45,6 +45,35 @@ bun run dev
 # 4. Open Web UI
 # http://localhost:5173
 ```
+
+### Hermes Agent (Optional)
+
+For local models via Ollama:
+
+```bash
+# Install Ollama
+curl -fsSL https://ollama.ai/install.sh | sh
+
+# Pull a model
+ollama pull qwen2.5-coder:32b
+
+# Install Hermes Agent
+pip install hermes-agent
+
+# Configure
+hermes setup
+```
+
+Add to `.archon/config.yaml`:
+```yaml
+assistants:
+  hermes:
+    model: qwen2.5-coder:32b
+    provider: ollama
+    endpoint: http://localhost:11434/v1
+```
+
+**Security:** For Docker/CI environments, set `HERMES_USE_GLOBAL_AUTH=true` in `.env` to use the global auth token.
 
 In development mode, two servers run simultaneously:
 

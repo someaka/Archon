@@ -412,6 +412,54 @@ DEFAULT_AI_ASSISTANT=codex
 
 </details>
 
+<details>
+<summary><b>Hermes Agent</b></summary>
+
+**Option A: Cloud models via OpenRouter**
+
+On your server, add to `.env`:
+
+```ini
+OPENROUTER_API_KEY=sk-or-***
+```
+
+**Option B: Local models via Ollama**
+
+Install Ollama on the VPS:
+
+```bash
+curl -fsSL https://ollama.ai/install.sh | sh
+ollama pull qwen2.5-coder:32b
+```
+
+**Install and configure Hermes Agent:**
+
+```bash
+pip install hermes-agent
+hermes setup
+```
+
+Add to `.archon/config.yaml`:
+```yaml
+assistants:
+  hermes:
+    model: qwen2.5-coder:32b
+    provider: ollama
+    endpoint: http://localhost:11434/v1
+```
+
+For OpenRouter, set `provider: openrouter` instead and omit `endpoint`.
+
+**Security:** Set `HERMES_USE_GLOBAL_AUTH=true` in `.env` to use the global auth token in Docker/CI environments instead of storing credentials locally.
+
+**Set as default (optional):**
+
+```ini
+DEFAULT_AI_ASSISTANT=hermes
+```
+
+</details>
+
 ### 4.3 Platform Adapter Setup
 
 **Configure at least one platform.**
