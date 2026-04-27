@@ -809,6 +809,96 @@ describe('bridgeHermesSession', () => {
     expect(resultChunks).toHaveLength(1);
   });
 
+  // ── Unrecognized update type ─────────────────────────────────────────────
+
+  test('unrecognized session/update type does not crash bridge', async () => {
+    const mock = createAcpMock({
+      updates: [{ sessionUpdate: 'agent_message_chunk', text: 'ok' }],
+    });
+
+    // Intercept stdin write to inject an extra notification with an unknown type
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          // Push an unrecognized update notification before the normal flow
+          mock.stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              method: 'session/update',
+              params: {
+                sessionId: 'test-session',
+                update: {
+                  sessionUpdate: 'unknown_type',
+                  content: { type: 'text', text: 'ignored' },
+                },
+              },
+            }) + '\n'
+          );
+        }
+      } catch {
+        /* ignore */
+      }
+      return originalWrite(chunk, ...args);
+    };
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    // Bridge should not crash and still emit the normal assistant chunk + result
+    const assistantChunks = chunks.filter(c => (c as { type: string }).type === 'assistant');
+    expect(assistantChunks).toHaveLength(1);
+    expect(assistantChunks[0]).toMatchObject({ content: 'ok' });
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).toMatchObject({ type: 'result', stopReason: 'end_turn' });
+
+    // Should have logged a warning about the invalid session update (isSessionUpdateParams returns false for unknown type)
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  // ── JSON-RPC error response ─────────────────────────────────────────────
+
+  test('JSON-RPC error response propagates as error result chunk', async () => {
+    const mock = createAcpMock({ updates: [] });
+
+    // Override stdin.write to return a JSON-RPC error for session/prompt
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          mock.stdout.push(
+            JSON.stringify({
+              jsonrpc: '2.0',
+              id: req.id,
+              error: { code: -32600, message: 'Invalid Request' },
+            }) + '\n'
+          );
+          const callback = args[args.length - 1];
+          if (typeof callback === 'function') callback();
+          return true;
+        }
+      } catch {
+        /* ignore */
+      }
+      return originalWrite(chunk, ...args);
+    };
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    const result = resultChunks[0] as { type: string; isError?: boolean; errors?: string[] };
+    expect(result.isError).toBe(true);
+    expect(result.errors).toBeDefined();
+    expect(result.errors![0]).toContain('-32600');
+    expect(result.errors![0]).toContain('Invalid Request');
+  });
+
   // ── Input validation ────────────────────────────────────────────────────
 
   test('throws for non-absolute cwd', async () => {
