@@ -7,6 +7,8 @@
  * history is maintained.
  */
 
+import { statSync } from 'node:fs';
+
 /**
  * Execution context for a Hermes CLI invocation.
  * Hermes is stateless per invocation — there is no persistent session store,
@@ -46,8 +48,19 @@ export function resolveHermesSession(options: {
 }): HermesSessionContext {
   const { cwd: rawCwd, env: providedEnv, resumeSessionId } = options;
 
-  // Validate cwd — fall back to process.cwd() if the provided path is empty.
+  // Validate cwd — fall back to process.cwd() if the provided path is empty, then verify existence and directory.
   const cwd = rawCwd && rawCwd.length > 0 ? rawCwd : process.cwd();
+  try {
+    const stats = statSync(cwd);
+    if (!stats.isDirectory()) {
+      throw new Error(`Hermes session cwd is not a directory: ${cwd}`);
+    }
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error(`Hermes session cwd does not exist: ${cwd}`);
+    }
+    throw err;
+  }
 
   // Merge environment: process.env is the baseline, caller-provided env overrides.
   const env: Record<string, string> = {};

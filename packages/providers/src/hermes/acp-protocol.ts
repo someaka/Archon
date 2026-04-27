@@ -1,3 +1,15 @@
+/** ACP (Agent Client Protocol) JSON-RPC 2.0 types and helpers.
+ *
+ * Defines the wire-format types used by the Hermes provider to communicate
+ * with the Hermes CLI via stdio.
+ *
+ * @see https://agentclientprotocol.com/protocol/schema
+ * @see https://agentclientprotocol.com/protocol/overview
+ */
+
+import { createLazyLogger } from '../utils/lazy-logger';
+const getLog = createLazyLogger('provider.hermes.acp-protocol');
+
 // ─── JSON-RPC 2.0 types ────────────────────────────────────────────────────
 
 /** JSON-RPC 2.0 request sent by Archon (client) → Hermes (server). */
@@ -39,29 +51,27 @@ export interface AcpIdGenerator {
 
 export function createAcpIdGenerator(start = 1): AcpIdGenerator {
   let nextId = start;
-  return { next: () => nextId++ };
+  return {
+    next: (): number => {
+      const id = nextId;
+      nextId = (nextId % Number.MAX_SAFE_INTEGER) + 1;
+      return id;
+    },
+  };
 }
 
 /**
  * Build a JSON-RPC 2.0 request object.
- * The id auto-increments for each call — caller must track the id
- * to match the response.
+ * The id is provided by the caller's ACP id generator — each call
+ * consumes one id from the generator's sequence.
  */
-// Legacy module-level fallback generator for backward-compatible callers
-let legacyId = 1;
-
 export function createRequest(
   method: string,
-  params?: Record<string, unknown>,
-  idGenerator?: AcpIdGenerator
+  params: Record<string, unknown> | undefined,
+  idGenerator: AcpIdGenerator
 ): JsonRpcRequest {
-  const id = idGenerator ? idGenerator.next() : legacyId++;
+  const id = idGenerator.next();
   return { jsonrpc: '2.0', id, method, params };
-}
-
-/** @deprecated No-op — IDs are now generated per-bridge via createAcpIdGenerator. */
-export function resetAcpIdCounter(_start = 1): void {
-  // no-op
 }
 
 /**
@@ -94,12 +104,39 @@ export function parseMessage(line: string): JsonRpcMessage | null {
     const obj: unknown = JSON.parse(line);
     if (obj && typeof obj === 'object' && (obj as Record<string, unknown>).jsonrpc === '2.0') {
       const record = obj as Record<string, unknown>;
-      if ('method' in record && !('id' in record)) return obj as JsonRpcNotification;
-      if ('result' in record) return obj as JsonRpcSuccess;
-      if ('error' in record) return obj as JsonRpcError;
+
+      // Reject messages with both result and method (protocol violation)
+      if ('result' in record && 'method' in record) return null;
+
+      // Notification: has method, no id
+      if ('method' in record && !('id' in record)) {
+        if (typeof record.method !== 'string') return null;
+        return obj as JsonRpcNotification;
+      }
+
+      // Success response: has result, id must be a number
+      if ('result' in record) {
+        if (typeof record.id !== 'number') return null;
+        return obj as JsonRpcSuccess;
+      }
+
+      // Error response: has error, id must be a number, error must have numeric code
+      if ('error' in record) {
+        if (typeof record.id !== 'number') return null;
+        const errorObj = record.error;
+        if (
+          !errorObj ||
+          typeof errorObj !== 'object' ||
+          typeof (errorObj as Record<string, unknown>).code !== 'number'
+        ) {
+          return null;
+        }
+        return obj as JsonRpcError;
+      }
     }
     return null;
-  } catch {
+  } catch (err) {
+    getLog().debug({ err, line: line.slice(0, 200) }, 'acp.parse_failed');
     return null;
   }
 }

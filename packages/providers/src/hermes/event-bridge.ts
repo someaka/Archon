@@ -17,6 +17,7 @@ import {
   type JsonRpcRequest,
 } from './acp-protocol';
 import { createLazyLogger } from '../utils/lazy-logger';
+import { BUNDLED_VERSION } from '@archon/paths';
 
 const getLog = createLazyLogger('provider.hermes.event-bridge');
 
@@ -24,6 +25,12 @@ const getLog = createLazyLogger('provider.hermes.event-bridge');
 
 const REQUEST_TIMEOUT_MS = 30000;
 const MAX_LINE_BUFFER_LENGTH = 1024 * 1024; // 1 MiB
+
+function redactSecrets(text: string): string {
+  return text
+    .replace(/\b(key|token|api_key|password|secret|auth)\b=\S+/gi, '$1=[REDACTED]')
+    .replace(/"(key|token|api_key|password|secret|auth)":\s*"[^"]*/gi, '"$1":"[REDACTED]');
+}
 
 /** Options passed to bridgeHermesSession for ACP request construction. */
 export interface BridgeOptions {
@@ -79,6 +86,7 @@ export async function* bridgeHermesSession(
   let terminalEmitted = false;
 
   let sessionId: string | undefined;
+  const MAX_STDERR_LINES = 50;
   const stderrLines: string[] = [];
 
   // ── stdout: line-by-line ACP JSON-RPC parser ──────────────────────────
@@ -88,13 +96,25 @@ export async function* bridgeHermesSession(
   let pendingRequestId: number | undefined;
   let requestResolve: ((msg: JsonRpcMessage) => void) | undefined;
   let requestReject: ((err: Error) => void) | undefined;
+  const activeTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   if (!childProcess.stdout) {
     throw new Error('Hermes ACP child process stdout is not available');
   }
 
   childProcess.stdout.on('data', (data: Buffer | string) => {
-    lineBuffer += data.toString();
+    const incoming = data.toString();
+    if (lineBuffer.length + incoming.length > MAX_LINE_BUFFER_LENGTH) {
+      const remaining = Math.max(0, MAX_LINE_BUFFER_LENGTH - lineBuffer.length);
+      if (remaining > 0) {
+        lineBuffer += incoming.slice(-remaining);
+      } else {
+        lineBuffer = incoming.slice(-MAX_LINE_BUFFER_LENGTH);
+      }
+      getLog().warn('acp.line_buffer_truncated');
+    } else {
+      lineBuffer += incoming;
+    }
     const lines = lineBuffer.split('\n');
     lineBuffer = lines.pop() ?? ''; // keep incomplete last line
     if (lineBuffer.length > MAX_LINE_BUFFER_LENGTH) {
@@ -117,6 +137,11 @@ export async function* bridgeHermesSession(
         requestResolve = undefined;
         requestReject = undefined;
         pendingRequestId = undefined;
+        const timer = activeTimers.get(msg.id);
+        if (timer) {
+          clearTimeout(timer);
+          activeTimers.delete(msg.id);
+        }
         continue;
       }
 
@@ -151,7 +176,10 @@ export async function* bridgeHermesSession(
     const text = data.toString().trim();
     if (text.length > 0) {
       stderrLines.push(text);
-      getLog().warn({ stderr: text.slice(0, 500) }, 'hermes.bridge.stderr_data');
+      if (stderrLines.length > MAX_STDERR_LINES) {
+        stderrLines.shift();
+      }
+      getLog().warn({ stderr: redactSecrets(text).slice(0, 500) }, 'hermes.bridge.stderr_data');
     }
   });
 
@@ -165,6 +193,13 @@ export async function* bridgeHermesSession(
     }
   }
 
+  /** Emit a terminal result chunk exactly once, regardless of which handler fires first. */
+  function emitTerminal(chunk: Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']): void {
+    if (terminalEmitted) return;
+    terminalEmitted = true;
+    queue.push({ kind: 'chunk', chunk });
+  }
+
   // ── process exit handling ──────────────────────────────────────────────
   childProcess.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
     if (sigkillTimeout) {
@@ -173,31 +208,19 @@ export async function* bridgeHermesSession(
     if (code !== 0 && code !== null) {
       getLog().warn({ code, signal }, 'hermes.bridge.process_exited_nonzero');
       rejectPending(`Hermes ACP exited with code ${code}`);
-      if (!terminalEmitted) {
-        terminalEmitted = true;
-        const errors = [`Hermes ACP exited with code ${code}`];
-        if (stderrLines.length > 0) {
-          errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
-        }
-        queue.push({
-          kind: 'chunk',
-          chunk: { type: 'result', isError: true, errors },
-        });
+      const errors = [`Hermes ACP exited with code ${code}`];
+      if (stderrLines.length > 0) {
+        errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
       }
+      emitTerminal({ type: 'result', isError: true, errors });
     } else if (signal !== null) {
       getLog().warn({ signal }, 'hermes.bridge.process_terminated_by_signal');
       rejectPending(`Hermes ACP terminated by signal ${signal}`);
-      if (!terminalEmitted) {
-        terminalEmitted = true;
-        queue.push({
-          kind: 'chunk',
-          chunk: {
-            type: 'result',
-            isError: true,
-            errors: [`Hermes ACP terminated by signal ${signal}`],
-          },
-        });
-      }
+      emitTerminal({
+        type: 'result',
+        isError: true,
+        errors: [`Hermes ACP terminated by signal ${signal}`],
+      });
     }
 
     queue.push({ kind: 'done' });
@@ -208,24 +231,14 @@ export async function* bridgeHermesSession(
     getLog().error({ err: error }, 'hermes.bridge.process_error');
     let errorMsg = `Failed to run Hermes ACP: ${error.message}`;
     if (stderrLines.length > 0) {
-      errorMsg += `\nstderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`;
+      errorMsg += `\nstderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`;
     }
     rejectPending(errorMsg);
-    if (!terminalEmitted) {
-      terminalEmitted = true;
-      const errors = [`Failed to run Hermes ACP: ${error.message}`];
-      if (stderrLines.length > 0) {
-        errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
-      }
-      queue.push({
-        kind: 'chunk',
-        chunk: {
-          type: 'result',
-          isError: true,
-          errors,
-        },
-      });
+    const errors = [`Failed to run Hermes ACP: ${error.message}`];
+    if (stderrLines.length > 0) {
+      errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
     }
+    emitTerminal({ type: 'result', isError: true, errors });
     queue.push({ kind: 'done' });
   });
 
@@ -235,35 +248,43 @@ export async function* bridgeHermesSession(
     getLog().debug('hermes.bridge.abort_signal_received');
     // Send session/cancel notification (fire-and-forget)
     if (sessionId) {
-      childProcess.stdin?.write(
-        serializeMessage(
+      try {
+        const data = serializeMessage(
           createNotification(ACP_METHODS.sessionCancel, {
             sessionId,
           })
-        )
-      );
+        );
+        const canWrite = childProcess.stdin?.write(data);
+        if (canWrite === false) {
+          getLog().debug('acp.stdin_backpressure_on_abort');
+        }
+      } catch (err) {
+        getLog().warn({ err }, 'acp.stdin_write_failed_on_abort');
+      }
     }
-    childProcess.kill('SIGTERM');
+    try {
+      childProcess.kill('SIGTERM');
+    } catch {
+      // Process already killed or exited — expected, no-op
+    }
     sigkillTimeout = setTimeout(() => {
       getLog().warn('hermes.bridge.sigkill_fallback');
-      childProcess.kill('SIGKILL');
+      try {
+        childProcess.kill('SIGKILL');
+      } catch {
+        // Process already killed or exited — expected, no-op
+      }
     }, 5000);
     let abortMsg = 'Query was aborted';
     if (stderrLines.length > 0) {
-      abortMsg += `\nstderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`;
+      abortMsg += `\nstderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`;
     }
     rejectPending(abortMsg);
-    if (!terminalEmitted) {
-      terminalEmitted = true;
-      const errors = ['Query was aborted'];
-      if (stderrLines.length > 0) {
-        errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
-      }
-      queue.push({
-        kind: 'chunk',
-        chunk: { type: 'result', isError: true, errors },
-      });
+    const errors = ['Query was aborted'];
+    if (stderrLines.length > 0) {
+      errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
     }
+    emitTerminal({ type: 'result', isError: true, errors });
     queue.close();
   };
 
@@ -287,15 +308,23 @@ export async function* bridgeHermesSession(
           reject(new Error('Hermes ACP child process stdin is not available'));
           return;
         }
-        childProcess.stdin.write(serializeMessage(req));
+        const data = serializeMessage(req);
+        const canWrite = childProcess.stdin.write(data);
+        if (!canWrite) {
+          childProcess.stdin.once('drain', () => {
+            getLog().debug('acp.stdin_drain_complete');
+          });
+        }
       }),
       new Promise<JsonRpcMessage>((_resolve, reject) => {
-        setTimeout(() => {
+        const timer = setTimeout(() => {
+          activeTimers.delete(req.id);
           pendingRequestId = undefined;
           requestResolve = undefined;
           requestReject = undefined;
           reject(new Error(`Hermes ACP request timed out after ${REQUEST_TIMEOUT_MS}ms`));
         }, REQUEST_TIMEOUT_MS);
+        activeTimers.set(req.id, timer);
       }),
     ]);
   }
@@ -307,7 +336,7 @@ export async function* bridgeHermesSession(
       {
         protocolVersion: 1,
         clientCapabilities: {},
-        clientInfo: { name: 'archon', version: '0.3.9' },
+        clientInfo: { name: 'archon', version: BUNDLED_VERSION },
       },
       idGen
     );
@@ -360,35 +389,23 @@ export async function* bridgeHermesSession(
     const promptResp = await sendRequest(promptReq);
 
     // 4. Emit terminal result
-    if (!terminalEmitted) {
-      terminalEmitted = true;
-      const stopReason =
-        'result' in promptResp
-          ? ((promptResp.result as Record<string, unknown>).stopReason as string)
-          : undefined;
-      queue.push({
-        kind: 'chunk',
-        chunk: {
-          type: 'result',
-          sessionId,
-          stopReason,
-        },
-      });
-    }
+    const stopReason =
+      'result' in promptResp
+        ? ((promptResp.result as Record<string, unknown>).stopReason as string)
+        : undefined;
+    emitTerminal({
+      type: 'result',
+      sessionId,
+      stopReason,
+    });
     queue.push({ kind: 'done' });
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
-    if (!terminalEmitted) {
-      terminalEmitted = true;
-      queue.push({
-        kind: 'chunk',
-        chunk: {
-          type: 'result',
-          isError: true,
-          errors: [(err as Error).message],
-        },
-      });
-    }
+    emitTerminal({
+      type: 'result',
+      isError: true,
+      errors: [(err as Error).message],
+    });
     queue.push({ kind: 'done' });
   }
 

@@ -14,6 +14,7 @@ async function importResolver(bundledIsBinary: boolean) {
   mock.module('@archon/paths', () => ({
     BUNDLED_IS_BINARY: bundledIsBinary,
     createLogger: () => ({ info: () => {}, debug: () => {}, error: () => {} }),
+    BUNDLED_VERSION: 'dev',
   }));
   const mod = await import(`./binary-resolver?t=${importCounter++}`);
   return mod as typeof import('./binary-resolver');

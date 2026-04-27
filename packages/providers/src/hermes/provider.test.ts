@@ -10,6 +10,7 @@ const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   BUNDLED_IS_BINARY: false,
+  BUNDLED_VERSION: 'dev',
 }));
 
 // ─── Mock child_process.spawn ──────────────────────────────────────────────
@@ -38,7 +39,6 @@ mock.module('./binary-resolver', () => ({
 // Import AFTER mocks are set — module resolution freezes the mocks.
 import { HermesProvider } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
-import { resetAcpIdCounter } from './acp-protocol';
 import type { ChildProcess } from 'child_process';
 
 // ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────
@@ -189,7 +189,6 @@ describe('HermesProvider', () => {
     mockLogger.debug.mockClear();
     mockLogger.info.mockClear();
     mockLogger.child.mockClear();
-    resetAcpIdCounter(1);
   });
 
   test('getType returns "hermes"', () => {

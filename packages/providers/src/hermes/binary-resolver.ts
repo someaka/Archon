@@ -13,7 +13,9 @@ import { existsSync as _existsSync } from 'node:fs';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { resolveBinaryPath } from '../utils/binary-resolver';
+import { createLazyLogger } from '../utils/lazy-logger';
 
+const getLog = createLazyLogger('provider.hermes.binary-resolver');
 const execFileAsync = promisify(execFile);
 
 /** Wrapper for existsSync — enables spyOn in tests (direct imports can't be spied on). */
@@ -42,7 +44,8 @@ export async function verifyHermesBinary(binary: string): Promise<boolean> {
   try {
     await execFileAsync(binary, ['--version'], { timeout: 5000 });
     return true;
-  } catch {
+  } catch (err) {
+    getLog().debug({ err, binary }, 'hermes.binary_verify_failed');
     return false;
   }
 }

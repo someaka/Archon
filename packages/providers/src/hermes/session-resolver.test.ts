@@ -8,6 +8,7 @@ const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   BUNDLED_IS_BINARY: false,
+  BUNDLED_VERSION: 'dev',
 }));
 
 import { resolveHermesSession } from './session-resolver';
@@ -77,7 +78,7 @@ describe('resolveHermesSession', () => {
 
   test('session context shape validation', () => {
     const result = resolveHermesSession({
-      cwd: '/workspace',
+      cwd: '/tmp',
       env: { KEY: 'value' },
     });
 

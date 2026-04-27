@@ -10,11 +10,11 @@ const mockLogger = createMockLogger();
 mock.module('@archon/paths', () => ({
   createLogger: mock(() => mockLogger),
   BUNDLED_IS_BINARY: false,
+  BUNDLED_VERSION: 'dev',
 }));
 
 import { bridgeHermesSession, type BridgeOptions } from './event-bridge';
 import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
-import { resetAcpIdCounter } from './acp-protocol';
 import type { ChildProcess } from 'child_process';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -294,12 +294,9 @@ describe('bridgeHermesSession', () => {
     mockLogger.info.mockClear();
     mockLogger.trace.mockClear();
     mockLogger.child.mockClear();
-    resetAcpIdCounter(1);
   });
 
-  afterEach(() => {
-    resetAcpIdCounter(1);
-  });
+  afterEach(() => {});
 
   // ── Happy path ──────────────────────────────────────────────────────────
 

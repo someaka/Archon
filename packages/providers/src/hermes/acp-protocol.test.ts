@@ -1,9 +1,15 @@
 import { describe, expect, test } from 'bun:test';
-import { createRequest, createNotification, parseMessage, serializeMessage } from './acp-protocol';
+import {
+  createRequest,
+  createNotification,
+  parseMessage,
+  serializeMessage,
+  createAcpIdGenerator,
+} from './acp-protocol';
 
 describe('ACP protocol', () => {
   test('createRequest builds valid JSON-RPC 2.0 request', () => {
-    const req = createRequest('session/new', { cwd: '/tmp' });
+    const req = createRequest('session/new', { cwd: '/tmp' }, createAcpIdGenerator());
     expect(req.jsonrpc).toBe('2.0');
     expect(req.method).toBe('session/new');
     expect(req.params).toEqual({ cwd: '/tmp' });
@@ -11,7 +17,7 @@ describe('ACP protocol', () => {
   });
 
   test('serializeMessage produces newline-terminated JSON', () => {
-    const req = createRequest('initialize', { protocolVersion: 1 });
+    const req = createRequest('initialize', { protocolVersion: 1 }, createAcpIdGenerator());
     const line = serializeMessage(req);
     expect(line.endsWith('\n')).toBe(true);
     expect(() => JSON.parse(line)).not.toThrow();
@@ -40,6 +46,26 @@ describe('ACP protocol', () => {
   test('parseMessage returns null for invalid JSON', () => {
     expect(parseMessage('not json')).toBeNull();
     expect(parseMessage('{"not":"jsonrpc"}')).toBeNull();
+  });
+
+  test('parseMessage rejects response with non-numeric id', () => {
+    const line = '{"jsonrpc":"2.0","id":"abc","result":{}}';
+    expect(parseMessage(line)).toBeNull();
+  });
+
+  test('parseMessage rejects message with both result and method', () => {
+    const line = '{"jsonrpc":"2.0","id":1,"result":{},"method":"foo"}';
+    expect(parseMessage(line)).toBeNull();
+  });
+
+  test('parseMessage rejects error with non-numeric code', () => {
+    const line = '{"jsonrpc":"2.0","id":1,"error":{"code":"BAD","message":"fail"}}';
+    expect(parseMessage(line)).toBeNull();
+  });
+
+  test('parseMessage rejects notification with non-string method', () => {
+    const line = '{"jsonrpc":"2.0","method":123}';
+    expect(parseMessage(line)).toBeNull();
   });
 
   test('createNotification has no id field', () => {

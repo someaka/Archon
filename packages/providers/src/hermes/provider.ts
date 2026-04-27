@@ -17,11 +17,22 @@ import { withFirstEventTimeout } from './timeout-utils';
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 const getLog = createLazyLogger('provider.hermes');
 
+const MAX_TIMEOUT_MS = 300_000; // 5 minutes
+
 function getFirstEventTimeoutMs(): number {
   const raw = process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
   if (raw) {
     const parsed = Number(raw);
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    if (Number.isFinite(parsed) && parsed > 0) {
+      if (parsed > MAX_TIMEOUT_MS) {
+        getLog().warn(
+          { requested: parsed, capped: MAX_TIMEOUT_MS },
+          'hermes.first_event_timeout_capped'
+        );
+        return MAX_TIMEOUT_MS;
+      }
+      return parsed;
+    }
   }
   return 60_000;
 }
