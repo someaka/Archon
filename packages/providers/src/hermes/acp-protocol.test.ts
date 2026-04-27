@@ -111,6 +111,25 @@ describe('ACP protocol', () => {
       expect(msg.params).toBeUndefined();
     }
   });
+
+  test('parseMessage handles deeply nested result object', () => {
+    const complexResult = {
+      sessionId: 'abc',
+      capabilities: {
+        loadSession: true,
+        promptCapabilities: { embeddedContext: true, maxTokens: 128000 },
+        mcpCapabilities: { toolDiscovery: true },
+      },
+      agentInfo: { name: 'hermes', title: 'Hermes Agent', version: '1.0.0' },
+      authMethods: [{ type: 'oauth2', name: 'Google', scopes: ['read', 'write'] }],
+    };
+    const line = JSON.stringify({ jsonrpc: '2.0', id: 42, result: complexResult });
+    const msg = parseMessage(line);
+    expect(msg).not.toBeNull();
+    if (msg && 'result' in msg) {
+      expect((msg.result as any).capabilities.promptCapabilities.maxTokens).toBe(128000);
+    }
+  });
 });
 
 describe('isSessionUpdateParams', () => {

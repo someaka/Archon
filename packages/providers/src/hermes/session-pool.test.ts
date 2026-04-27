@@ -1,11 +1,11 @@
-import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { HermesSessionPool, type PooledSession, type SessionPoolConfig } from './session-pool';
 import type { ChildProcess } from 'node:child_process';
 
 function mockChildProcess(): ChildProcess {
   return {
-    kill: vi.fn(),
-    unref: vi.fn(),
+    kill: mock(() => true),
+    unref: mock(() => {}),
   } as unknown as ChildProcess;
 }
 
@@ -115,6 +115,48 @@ describe('HermesSessionPool', () => {
     expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
     expect(cp2.kill).toHaveBeenCalledWith('SIGKILL');
     expect(pool.size).toBe(0);
+  });
+
+  test('delete for non-existent key is a no-op', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    expect(() => pool.delete('/nonexistent', 'model')).not.toThrow();
+    expect(pool.size).toBe(0);
+  });
+
+  test('set overwrites existing session and kills old process', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const cp1 = mockChildProcess();
+    const cp2 = mockChildProcess();
+    pool.set('/tmp', 'model', makeSession({ childProcess: cp1 }));
+    pool.set('/tmp', 'model', makeSession({ childProcess: cp2 }));
+    expect(pool.size).toBe(1);
+    // Old process should have been killed
+    expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
+    pool.delete('/tmp', 'model');
+    expect(cp2.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  test('cleanup timer kills only idle sessions, not recently-used ones', async () => {
+    pool = new HermesSessionPool({
+      idleTimeoutMs: 100,
+      maxAgeMs: 600_000,
+      cleanupIntervalMs: 50,
+    });
+    const cpIdle = mockChildProcess();
+    const cpActive = mockChildProcess();
+    pool.set('/dir1', 'm1', makeSession({ childProcess: cpIdle }));
+    pool.set('/dir2', 'm2', makeSession({ childProcess: cpActive }));
+
+    // Keep cpActive active
+    const interval = setInterval(() => {
+      pool.get('/dir2', 'm2');
+    }, 30);
+    await new Promise(r => setTimeout(r, 200));
+    clearInterval(interval);
+
+    expect(cpIdle.kill).toHaveBeenCalled();
+    expect(cpActive.kill).not.toHaveBeenCalled();
+    expect(pool.size).toBe(1);
   });
 
   test('size returns correct count', () => {

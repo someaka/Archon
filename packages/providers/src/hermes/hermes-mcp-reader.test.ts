@@ -213,4 +213,22 @@ mcp_servers:
     expect(result).toHaveLength(2);
     expect(result.map(s => s.name).sort()).toEqual(['server_a', 'server_b']);
   });
+
+  test('handles env values containing "=" characters', async () => {
+    const yaml = `
+mcp_servers:
+  test_server:
+    command: node
+    args: ["server.js"]
+    env:
+      KEY: value=with=equals
+      SIMPLE: plain
+`;
+    await writeConfig(yaml);
+
+    const result = await readHermesMcpConfig(tempDir);
+
+    expect(result).toHaveLength(1);
+    expect(result[0].env).toEqual(['KEY=value=with=equals', 'SIMPLE=plain']);
+  });
 });
