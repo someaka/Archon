@@ -442,7 +442,7 @@ describe('bridgeHermesSession', () => {
 
   // ── Abort signal ────────────────────────────────────────────────────────
 
-  test('abort signal kills process and stream terminates with error result', async () => {
+  test('pre-aborted signal immediately emits terminal error result', async () => {
     const controller = new AbortController();
     controller.abort();
 
@@ -459,6 +459,130 @@ describe('bridgeHermesSession', () => {
       isError: true,
       errors: ['Query was aborted'],
     });
+  });
+
+  test('abort during session sends session/cancel notification on stdin', async () => {
+    const controller = new AbortController();
+
+    // Track stdin writes to verify session/cancel is sent
+    const stdinWrites: string[] = [];
+
+    const mock = createAcpMock({ updates: [] });
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      stdinWrites.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return originalWrite(chunk, ...args);
+    };
+
+    const gen = bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal);
+    const iter = gen[Symbol.asyncIterator]();
+
+    // Let initialize + session/new complete, so sessionId is set
+    await iter.next();
+
+    // Abort the signal
+    controller.abort();
+
+    // Drain remaining chunks
+    await consume(gen).catch(() => {});
+
+    // Verify session/cancel was written to stdin
+    const cancelWrites = stdinWrites.filter(w => w.includes('session/cancel'));
+    expect(cancelWrites.length).toBeGreaterThan(0);
+    const cancelMsg = JSON.parse(cancelWrites[0]);
+    expect(cancelMsg.method).toBe('session/cancel');
+    expect(cancelMsg.params.sessionId).toBe('test-session');
+  });
+
+  test('abort signal sends SIGTERM to child process', async () => {
+    const controller = new AbortController();
+
+    const mock = createAcpMock({ updates: [] });
+    const killSpy = mock.process.kill as (signal?: NodeJS.Signals | number) => boolean;
+    const killCalls: string[] = [];
+    mock.process.kill = ((signal?: NodeJS.Signals | number) => {
+      killCalls.push(signal as string);
+      return killSpy(signal);
+    }) as any;
+
+    const gen = bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal);
+    const iter = gen[Symbol.asyncIterator]();
+
+    // Let session/new complete
+    await iter.next();
+
+    // Abort
+    controller.abort();
+
+    await consume(gen).catch(() => {});
+
+    expect(killCalls).toContain('SIGTERM');
+  });
+
+  test('abort during session emits terminal result with isError: true', async () => {
+    const controller = new AbortController();
+
+    // Create a mock that does NOT respond to session/prompt so the session stays open
+    const mock = createAcpMock({ updates: [] });
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    let promptSent = false;
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          promptSent = true;
+          // Don't respond — keep session open
+          const callback = args[args.length - 1];
+          if (typeof callback === 'function') callback();
+          return true;
+        }
+      } catch {
+        /* ignore */
+      }
+      return originalWrite(chunk, ...args);
+    };
+
+    const gen = bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal);
+    const iter = gen[Symbol.asyncIterator]();
+
+    // This will hang waiting for session/prompt response — abort during the wait
+    const pending = iter.next();
+
+    // Give the bridge time to send initialize + session/new and then session/prompt
+    await new Promise(r => setTimeout(r, 50));
+    expect(promptSent).toBe(true);
+
+    // Abort the signal while session/prompt is pending
+    controller.abort();
+
+    // Now the pending next should resolve with the abort result
+    const { value } = await pending;
+    expect(value).toBeDefined();
+    expect((value as any).type).toBe('result');
+    expect((value as any).isError).toBe(true);
+    expect((value as any).errors).toContain('Query was aborted');
+
+    // Consume the rest to prevent leaks
+    await consume(gen).catch(() => {});
+  });
+
+  test('abort signal closes the queue so consumer exits cleanly', async () => {
+    const controller = new AbortController();
+
+    const mock = createAcpMock({ updates: [] });
+    const gen = bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal);
+
+    // Abort immediately
+    controller.abort();
+
+    // consume() should complete without hanging (queue is closed)
+    const { chunks } = await consume(gen);
+
+    // Should have at least a terminal result
+    expect(chunks.length).toBeGreaterThan(0);
+    const lastChunk = chunks[chunks.length - 1] as { type: string };
+    expect(lastChunk.type).toBe('result');
   });
 
   // ── Stderr output ───────────────────────────────────────────────────────
