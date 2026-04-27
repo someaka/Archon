@@ -67,6 +67,8 @@ export interface BridgeOptions {
   cwd: string;
   systemPrompt?: string;
   mcpServers?: AcpMcpServer[];
+  skipInit?: boolean; // Skip initialize/session/new — reuse existing session
+  existingSessionId?: string; // Session ID to use when skipInit is true
 }
 
 // ─── bridgeHermesSession (ACP JSON-RPC 2.0) ────────────────────────────────
@@ -406,87 +408,95 @@ export async function* bridgeHermesSession(
   }
 
   try {
-    // 1. Initialize
-    const initReq = createRequest(
-      ACP_METHODS.initialize,
-      {
-        protocolVersion: 1,
-        clientCapabilities: {
-          fs: { readTextFile: false, writeTextFile: false },
-          terminal: false,
-        },
-        clientInfo: { name: 'archon', version: BUNDLED_VERSION },
-      },
-      idGen
-    );
-    const initResp = await sendRequest(initReq);
-    if ('error' in initResp) {
-      const err = initResp.error as { code: number; message: string };
-      throw new Error(`ACP initialize failed: ${err.message} (code ${err.code})`);
-    }
-    if (
-      'result' in initResp &&
-      typeof (initResp.result as Record<string, unknown>).protocolVersion === 'number'
-    ) {
-      const protoVersion = (initResp.result as Record<string, unknown>).protocolVersion as number;
-      if (protoVersion !== 1) {
-        throw new Error(
-          `Hermes ACP protocol version ${protoVersion} is not supported. Only version 1 is supported.`
-        );
-      }
-    }
-
-    // Log agent capabilities, info, and auth methods from the initialize response
-    if ('result' in initResp) {
-      const result = initResp.result as Record<string, unknown>;
-
-      if (result.agentCapabilities && typeof result.agentCapabilities === 'object') {
-        const caps = result.agentCapabilities as Record<string, unknown>;
-        getLog().debug(
-          {
-            loadSession: caps.loadSession,
-            promptCapabilities: caps.promptCapabilities,
-            mcpCapabilities: caps.mcpCapabilities,
+    if (!options.skipInit) {
+      // 1. Initialize
+      const initReq = createRequest(
+        ACP_METHODS.initialize,
+        {
+          protocolVersion: 1,
+          clientCapabilities: {
+            fs: { readTextFile: false, writeTextFile: false },
+            terminal: false,
           },
-          'acp.initialize.agent_capabilities'
-        );
+          clientInfo: { name: 'archon', version: BUNDLED_VERSION },
+        },
+        idGen
+      );
+      const initResp = await sendRequest(initReq);
+      if ('error' in initResp) {
+        const err = initResp.error as { code: number; message: string };
+        throw new Error(`ACP initialize failed: ${err.message} (code ${err.code})`);
+      }
+      if (
+        'result' in initResp &&
+        typeof (initResp.result as Record<string, unknown>).protocolVersion === 'number'
+      ) {
+        const protoVersion = (initResp.result as Record<string, unknown>).protocolVersion as number;
+        if (protoVersion !== 1) {
+          throw new Error(
+            `Hermes ACP protocol version ${protoVersion} is not supported. Only version 1 is supported.`
+          );
+        }
       }
 
-      if (result.agentInfo && typeof result.agentInfo === 'object') {
-        const info = result.agentInfo as Record<string, unknown>;
-        getLog().debug(
-          { name: info.name, title: info.title, version: info.version },
-          'acp.initialize.agent_info'
-        );
+      // Log agent capabilities, info, and auth methods from the initialize response
+      if ('result' in initResp) {
+        const result = initResp.result as Record<string, unknown>;
+
+        if (result.agentCapabilities && typeof result.agentCapabilities === 'object') {
+          const caps = result.agentCapabilities as Record<string, unknown>;
+          getLog().debug(
+            {
+              loadSession: caps.loadSession,
+              promptCapabilities: caps.promptCapabilities,
+              mcpCapabilities: caps.mcpCapabilities,
+            },
+            'acp.initialize.agent_capabilities'
+          );
+        }
+
+        if (result.agentInfo && typeof result.agentInfo === 'object') {
+          const info = result.agentInfo as Record<string, unknown>;
+          getLog().debug(
+            { name: info.name, title: info.title, version: info.version },
+            'acp.initialize.agent_info'
+          );
+        }
+
+        if (Array.isArray(result.authMethods)) {
+          getLog().debug({ authMethods: result.authMethods }, 'acp.initialize.auth_methods');
+        }
       }
 
-      if (Array.isArray(result.authMethods)) {
-        getLog().debug({ authMethods: result.authMethods }, 'acp.initialize.auth_methods');
+      // 2. New session
+      const sessionReq = createRequest(
+        ACP_METHODS.sessionNew,
+        {
+          cwd: options.cwd,
+          mcpServers: options.mcpServers ?? [], // passed through from caller; empty by default
+        },
+        idGen
+      );
+      const sessionResp = await sendRequest(sessionReq);
+      if ('error' in sessionResp) {
+        const err = sessionResp.error as { code: number; message: string };
+        throw new Error(`ACP session/new failed: ${err.message} (code ${err.code})`);
       }
-    }
-
-    // 2. New session
-    const sessionReq = createRequest(
-      ACP_METHODS.sessionNew,
-      {
-        cwd: options.cwd,
-        mcpServers: options.mcpServers ?? [], // passed through from caller; empty by default
-      },
-      idGen
-    );
-    const sessionResp = await sendRequest(sessionReq);
-    if ('error' in sessionResp) {
-      const err = sessionResp.error as { code: number; message: string };
-      throw new Error(`ACP session/new failed: ${err.message} (code ${err.code})`);
-    }
-    if ('result' in sessionResp) {
-      const result = sessionResp.result as Record<string, unknown>;
-      if (typeof result.sessionId === 'string') {
-        sessionId = result.sessionId;
+      if ('result' in sessionResp) {
+        const result = sessionResp.result as Record<string, unknown>;
+        if (typeof result.sessionId === 'string') {
+          sessionId = result.sessionId;
+        }
       }
-    }
-    if (!sessionId) {
-      throw new Error('Hermes ACP did not return a valid sessionId');
+      if (!sessionId) {
+        throw new Error('Hermes ACP did not return a valid sessionId');
+      }
+    } else {
+      // skipInit mode: reuse an existing session
+      if (!options.existingSessionId) {
+        throw new Error('existingSessionId is required when skipInit is true');
+      }
+      sessionId = options.existingSessionId;
     }
 
     // 3. Send prompt
@@ -524,7 +534,8 @@ export async function* bridgeHermesSession(
       ...(tokens ? { tokens } : {}),
     });
     // Send session/close notification (fire-and-forget) per ACP spec.
-    if (sessionId) {
+    // Skip in prompt-only mode to preserve the existing session.
+    if (sessionId && !options.skipInit) {
       try {
         const data = serializeMessage(
           createNotification(ACP_METHODS.sessionClose, {
@@ -569,10 +580,13 @@ export async function* bridgeHermesSession(
     }
 
     // Ensure the child process is definitely killed if still running.
-    try {
-      childProcess.kill('SIGKILL');
-    } catch {
-      // Process may already be gone — this is defensive.
+    // Skip in prompt-only mode to preserve the existing session.
+    if (!options.skipInit) {
+      try {
+        childProcess.kill('SIGKILL');
+      } catch {
+        // Process may already be gone — this is defensive.
+      }
     }
   }
 }
