@@ -2,9 +2,6 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { createLogger } from '@archon/paths';
-import type { Api, Model } from '@mariozechner/pi-ai';
-
 import type {
   IAgentProvider,
   MessageChunk,
