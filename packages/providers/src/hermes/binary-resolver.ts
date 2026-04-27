@@ -10,7 +10,11 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { existsSync as _existsSync } from 'node:fs';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
 import { resolveBinaryPath } from '../utils/binary-resolver';
+
+const execFileAsync = promisify(execFile);
 
 /** Wrapper for existsSync — enables spyOn in tests (direct imports can't be spied on). */
 export function fileExists(path: string): boolean {
@@ -33,6 +37,15 @@ export const INSTALL_INSTRUCTIONS =
   '      hermes:\n' +
   '        hermesBinaryPath: /absolute/path/to/hermes\n\n' +
   'See: https://archon.diy/docs/reference/configuration#hermes';
+
+export async function verifyHermesBinary(binary: string): Promise<boolean> {
+  try {
+    await execFileAsync(binary, ['--version'], { timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Resolve the path to the Hermes CLI binary.

@@ -108,3 +108,42 @@ describe('resolveHermesBinary', () => {
     spy.mockRestore();
   });
 });
+
+async function importResolverWithExecFile(mockExecFile: (...args: any[]) => any) {
+  mock.module('child_process', () => ({
+    execFile: mockExecFile,
+  }));
+  const mod = await import(`./binary-resolver?t=${importCounter++}`);
+  return mod as typeof import('./binary-resolver');
+}
+
+describe('verifyHermesBinary', () => {
+  test('returns true when execFile succeeds', async () => {
+    const mockExecFile = mock((file: string, args: string[], options: any, callback: any) => {
+      callback(null, '1.0.0\n', '');
+    });
+    const resolver = await importResolverWithExecFile(mockExecFile);
+    const result = await resolver.verifyHermesBinary('/fake/hermes');
+    expect(result).toBe(true);
+  });
+
+  test('returns false when execFile throws', async () => {
+    const mockExecFile = mock((file: string, args: string[], options: any, callback: any) => {
+      callback(new Error('ENOENT'), '', '');
+    });
+    const resolver = await importResolverWithExecFile(mockExecFile);
+    const result = await resolver.verifyHermesBinary('/fake/hermes');
+    expect(result).toBe(false);
+  });
+
+  test('returns false when execFile times out', async () => {
+    const mockExecFile = mock((file: string, args: string[], options: any, callback: any) => {
+      const err = new Error('ETIMEOUT');
+      (err as any).killed = true;
+      callback(err, '', '');
+    });
+    const resolver = await importResolverWithExecFile(mockExecFile);
+    const result = await resolver.verifyHermesBinary('/fake/hermes');
+    expect(result).toBe(false);
+  });
+});

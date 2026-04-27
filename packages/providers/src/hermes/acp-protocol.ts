@@ -33,11 +33,13 @@ export type JsonRpcMessage = JsonRpcSuccess | JsonRpcError | JsonRpcNotification
 
 // ─── Request / notification builders ────────────────────────────────────────
 
-let nextId = 1;
+export interface AcpIdGenerator {
+  next(): number;
+}
 
-/** Reset the auto-incrementing request id counter. Exported for tests. */
-export function resetAcpIdCounter(start = 1): void {
-  nextId = start;
+export function createAcpIdGenerator(start = 1): AcpIdGenerator {
+  let nextId = start;
+  return { next: () => nextId++ };
 }
 
 /**
@@ -45,8 +47,21 @@ export function resetAcpIdCounter(start = 1): void {
  * The id auto-increments for each call — caller must track the id
  * to match the response.
  */
-export function createRequest(method: string, params?: Record<string, unknown>): JsonRpcRequest {
-  return { jsonrpc: '2.0', id: nextId++, method, params };
+// Legacy module-level fallback generator for backward-compatible callers
+let legacyId = 1;
+
+export function createRequest(
+  method: string,
+  params?: Record<string, unknown>,
+  idGenerator?: AcpIdGenerator
+): JsonRpcRequest {
+  const id = idGenerator ? idGenerator.next() : legacyId++;
+  return { jsonrpc: '2.0', id, method, params };
+}
+
+/** @deprecated No-op — IDs are now generated per-bridge via createAcpIdGenerator. */
+export function resetAcpIdCounter(_start = 1): void {
+  // no-op
 }
 
 /**
@@ -123,4 +138,24 @@ export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpda
 export interface SessionUpdateParams {
   sessionId: string;
   update: SessionUpdateUnion;
+}
+
+export const ACP_METHODS = {
+  initialize: 'initialize',
+  sessionNew: 'session/new',
+  sessionPrompt: 'session/prompt',
+  sessionCancel: 'session/cancel',
+  sessionUpdate: 'session/update',
+} as const;
+
+export function isSessionUpdateParams(obj: unknown): obj is SessionUpdateParams {
+  if (!obj || typeof obj !== 'object') return false;
+  const record = obj as Record<string, unknown>;
+  if (typeof record.sessionId !== 'string') return false;
+  if (!record.update || typeof record.update !== 'object') return false;
+  const update = record.update as Record<string, unknown>;
+  if (typeof update.sessionUpdate !== 'string') return false;
+  return (
+    update.sessionUpdate === 'agent_message_chunk' || update.sessionUpdate === 'agent_thought_chunk'
+  );
 }

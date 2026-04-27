@@ -9,12 +9,22 @@ import type {
 import { HERMES_CAPABILITIES } from './capabilities';
 import { parseHermesConfig } from './config';
 import { bridgeHermesSession } from './event-bridge';
-import { resolveHermesBinary } from './binary-resolver';
+import { resolveHermesBinary, verifyHermesBinary, INSTALL_INSTRUCTIONS } from './binary-resolver';
 import { resolveHermesSession } from './session-resolver';
 import { createLazyLogger } from '../utils/lazy-logger';
+import { withFirstEventTimeout } from './timeout-utils';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 const getLog = createLazyLogger('provider.hermes');
+
+function getFirstEventTimeoutMs(): number {
+  const raw = process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
+  if (raw) {
+    const parsed = Number(raw);
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+  return 60_000;
+}
 
 /**
  * Hermes provider — wraps the Hermes CLI tool (invoked via
@@ -87,6 +97,14 @@ export class HermesProvider implements IAgentProvider {
     // 3. Find the hermes binary. Config override wins; falls back to PATH.
     const hermesBinary = (await resolveHermesBinary(config.hermesBinaryPath)) ?? 'hermes';
 
+    // 3a. Pre-flight check — verify the binary is executable and responds to --version.
+    const isValid = await verifyHermesBinary(hermesBinary);
+    if (!isValid) {
+      throw new Error(
+        `Hermes binary '${hermesBinary}' is not executable or not working. ${INSTALL_INSTRUCTIONS}`
+      );
+    }
+
     getLog().debug(
       {
         hermesBinary,
@@ -105,14 +123,18 @@ export class HermesProvider implements IAgentProvider {
 
     // 5. Bridge the ACP session — yield all chunks from the child process.
     try {
-      yield* bridgeHermesSession(
-        child,
-        {
-          prompt,
-          cwd: session.cwd,
-          systemPrompt: options?.systemPrompt,
-        },
-        options?.abortSignal
+      yield* withFirstEventTimeout(
+        bridgeHermesSession(
+          child,
+          {
+            prompt,
+            cwd: session.cwd,
+            systemPrompt: options?.systemPrompt,
+          },
+          options?.abortSignal
+        ),
+        getFirstEventTimeoutMs(),
+        `hermes acp cwd=${session.cwd}`
       );
       getLog().debug('hermes.query_completed');
     } catch (err) {

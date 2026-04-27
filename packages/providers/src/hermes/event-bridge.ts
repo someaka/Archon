@@ -1,21 +1,29 @@
+import { isAbsolute } from 'path';
+
 import type { ChildProcess } from 'child_process';
 
 import type { MessageChunk } from '../types';
 import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
 import {
+  ACP_METHODS,
+  createNotification,
   createRequest,
+  createAcpIdGenerator,
+  isSessionUpdateParams,
   parseMessage,
   serializeMessage,
   type ContentBlock,
   type JsonRpcMessage,
   type JsonRpcRequest,
-  type SessionUpdateParams,
 } from './acp-protocol';
 import { createLazyLogger } from '../utils/lazy-logger';
 
 const getLog = createLazyLogger('provider.hermes.event-bridge');
 
 // ─── Bridge options ─────────────────────────────────────────────────────────
+
+const REQUEST_TIMEOUT_MS = 30000;
+const MAX_LINE_BUFFER_LENGTH = 1024 * 1024; // 1 MiB
 
 /** Options passed to bridgeHermesSession for ACP request construction. */
 export interface BridgeOptions {
@@ -59,6 +67,10 @@ export async function* bridgeHermesSession(
 ): AsyncGenerator<MessageChunk> {
   const queue = new AsyncQueue<BridgeQueueItem>();
 
+  if (!isAbsolute(options.cwd)) {
+    throw new Error(`Hermes ACP requires absolute cwd, got: ${options.cwd}`);
+  }
+
   // Prevent the child process from keeping the parent process alive.
   childProcess.unref();
 
@@ -85,7 +97,10 @@ export async function* bridgeHermesSession(
     lineBuffer += data.toString();
     const lines = lineBuffer.split('\n');
     lineBuffer = lines.pop() ?? ''; // keep incomplete last line
-
+    if (lineBuffer.length > MAX_LINE_BUFFER_LENGTH) {
+      lineBuffer = lineBuffer.slice(-MAX_LINE_BUFFER_LENGTH);
+      getLog().warn('acp.line_buffer_truncated');
+    }
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -108,8 +123,12 @@ export async function* bridgeHermesSession(
       // Handle notifications (session/update)
       if ('method' in msg && !('id' in msg)) {
         const notif = msg;
-        if (notif.method === 'session/update' && notif.params) {
-          const params = notif.params as unknown as SessionUpdateParams;
+        if (notif.method === ACP_METHODS.sessionUpdate && notif.params) {
+          const params = notif.params;
+          if (!isSessionUpdateParams(params)) {
+            getLog().warn({ params }, 'acp.invalid_session_update');
+            continue;
+          }
           const update = params.update;
           if (update.sessionUpdate === 'agent_message_chunk') {
             queue.push({
@@ -148,6 +167,9 @@ export async function* bridgeHermesSession(
 
   // ── process exit handling ──────────────────────────────────────────────
   childProcess.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+    if (sigkillTimeout) {
+      clearTimeout(sigkillTimeout);
+    }
     if (code !== 0 && code !== null) {
       getLog().warn({ code, signal }, 'hermes.bridge.process_exited_nonzero');
       rejectPending(`Hermes ACP exited with code ${code}`);
@@ -184,15 +206,23 @@ export async function* bridgeHermesSession(
   // ── process error handling (spawn failure, EPIPE, etc.) ────────────────
   childProcess.on('error', (error: Error) => {
     getLog().error({ err: error }, 'hermes.bridge.process_error');
-    rejectPending(`Failed to run Hermes ACP: ${error.message}`);
+    let errorMsg = `Failed to run Hermes ACP: ${error.message}`;
+    if (stderrLines.length > 0) {
+      errorMsg += `\nstderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`;
+    }
+    rejectPending(errorMsg);
     if (!terminalEmitted) {
       terminalEmitted = true;
+      const errors = [`Failed to run Hermes ACP: ${error.message}`];
+      if (stderrLines.length > 0) {
+        errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
+      }
       queue.push({
         kind: 'chunk',
         chunk: {
           type: 'result',
           isError: true,
-          errors: [`Failed to run Hermes ACP: ${error.message}`],
+          errors,
         },
       });
     }
@@ -207,12 +237,9 @@ export async function* bridgeHermesSession(
     if (sessionId) {
       childProcess.stdin?.write(
         serializeMessage(
-          createRequest(
-            'session/cancel' as const,
-            {
-              sessionId,
-            } as unknown as Record<string, unknown>
-          )
+          createNotification(ACP_METHODS.sessionCancel, {
+            sessionId,
+          })
         )
       );
     }
@@ -221,12 +248,20 @@ export async function* bridgeHermesSession(
       getLog().warn('hermes.bridge.sigkill_fallback');
       childProcess.kill('SIGKILL');
     }, 5000);
-    rejectPending('Query was aborted');
+    let abortMsg = 'Query was aborted';
+    if (stderrLines.length > 0) {
+      abortMsg += `\nstderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`;
+    }
+    rejectPending(abortMsg);
     if (!terminalEmitted) {
       terminalEmitted = true;
+      const errors = ['Query was aborted'];
+      if (stderrLines.length > 0) {
+        errors.push(`stderr: ${stderrLines[stderrLines.length - 1].slice(0, 200)}`);
+      }
       queue.push({
         kind: 'chunk',
-        chunk: { type: 'result', isError: true, errors: ['Query was aborted'] },
+        chunk: { type: 'result', isError: true, errors },
       });
     }
     queue.close();
@@ -241,39 +276,69 @@ export async function* bridgeHermesSession(
   }
 
   // ── Send ACP requests sequentially ─────────────────────────────────────
+  const idGen = createAcpIdGenerator();
   async function sendRequest(req: JsonRpcRequest): Promise<JsonRpcMessage> {
-    return new Promise((resolve, reject) => {
-      pendingRequestId = req.id;
-      requestResolve = resolve;
-      requestReject = reject;
-      if (!childProcess.stdin) {
-        reject(new Error('Hermes ACP child process stdin is not available'));
-        return;
-      }
-      childProcess.stdin.write(serializeMessage(req));
-    });
+    return Promise.race([
+      new Promise<JsonRpcMessage>((resolve, reject) => {
+        pendingRequestId = req.id;
+        requestResolve = resolve;
+        requestReject = reject;
+        if (!childProcess.stdin) {
+          reject(new Error('Hermes ACP child process stdin is not available'));
+          return;
+        }
+        childProcess.stdin.write(serializeMessage(req));
+      }),
+      new Promise<JsonRpcMessage>((_resolve, reject) => {
+        setTimeout(() => {
+          pendingRequestId = undefined;
+          requestResolve = undefined;
+          requestReject = undefined;
+          reject(new Error(`Hermes ACP request timed out after ${REQUEST_TIMEOUT_MS}ms`));
+        }, REQUEST_TIMEOUT_MS);
+      }),
+    ]);
   }
 
   try {
     // 1. Initialize
-    const initReq = createRequest('initialize', {
-      protocolVersion: 1,
-      clientCapabilities: {},
-      clientInfo: { name: 'archon', version: '0.3.9' },
-    });
-    await sendRequest(initReq);
+    const initReq = createRequest(
+      ACP_METHODS.initialize,
+      {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: 'archon', version: '0.3.9' },
+      },
+      idGen
+    );
+    const initResp = await sendRequest(initReq);
+    if (
+      'result' in initResp &&
+      typeof (initResp.result as Record<string, unknown>).protocol_version === 'number'
+    ) {
+      const protoVersion = (initResp.result as Record<string, unknown>).protocol_version as number;
+      if (protoVersion !== 1) {
+        throw new Error(
+          `Hermes ACP protocol version ${protoVersion} is not supported. Only version 1 is supported.`
+        );
+      }
+    }
 
     // 2. New session
-    const sessionReq = createRequest('session/new', {
-      cwd: options.cwd,
-      mcpServers: [],
-    });
+    const sessionReq = createRequest(
+      ACP_METHODS.sessionNew,
+      {
+        cwd: options.cwd,
+        mcpServers: [],
+      },
+      idGen
+    );
     const sessionResp = await sendRequest(sessionReq);
     if ('result' in sessionResp) {
       sessionId = (sessionResp.result as Record<string, unknown>).sessionId as string;
     }
-    if (!sessionId) {
-      throw new Error('Hermes ACP did not return a sessionId');
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length === 0) {
+      throw new Error('Hermes ACP did not return a valid sessionId');
     }
 
     // 3. Send prompt
@@ -284,10 +349,14 @@ export async function* bridgeHermesSession(
         ]
       : [{ type: 'text', text: options.prompt }];
 
-    const promptReq = createRequest('session/prompt', {
-      sessionId,
-      prompt: blocks,
-    });
+    const promptReq = createRequest(
+      ACP_METHODS.sessionPrompt,
+      {
+        sessionId,
+        prompt: blocks,
+      },
+      idGen
+    );
     const promptResp = await sendRequest(promptReq);
 
     // 4. Emit terminal result

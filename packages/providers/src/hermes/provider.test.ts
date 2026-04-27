@@ -15,7 +15,11 @@ mock.module('@archon/paths', () => ({
 // ─── Mock child_process.spawn ──────────────────────────────────────────────
 
 const mockSpawn = mock(
-  (_command: string, _args: readonly string[], _options?: Record<string, unknown>) => {
+  (
+    _command: string,
+    _args: readonly string[],
+    _options?: Record<string, unknown>
+  ): ChildProcess => {
     throw new Error('mockSpawn not implemented for this call');
   }
 );
@@ -26,6 +30,7 @@ mock.module('child_process', () => ({
 
 mock.module('./binary-resolver', () => ({
   resolveHermesBinary: mock(async (path?: string) => path),
+  verifyHermesBinary: mock(async () => true),
   fileExists: () => true,
   INSTALL_INSTRUCTIONS: '',
 }));
