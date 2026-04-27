@@ -388,7 +388,7 @@ describe('HermesProvider', () => {
 
   test('capabilities reflect v1 Hermes wiring', () => {
     const caps = new HermesProvider().getCapabilities();
-    expect(caps.sessionResume).toBe(false);
+    expect(caps.sessionResume).toBe(true);
     expect(caps.mcp).toBe(true);
     expect(caps.hooks).toBe(false);
     expect(caps.skills).toBe(false);

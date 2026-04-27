@@ -6,8 +6,10 @@ import type { ProviderCapabilities } from '../types';
  * these to warn users when a workflow node specifies a feature the provider
  * ignores.
  *
- * sessionResume: false — Hermes CLI sessions are single-shot; each invocation
- * is independent and there is no persistent session store to resume from.
+ * sessionResume: true — The Hermes provider maintains a session pool that
+ * persists child processes across sendQuery calls for the same cwd+model
+ * combination. Pooled sessions are reused with skipInit mode (no re-init),
+ * enabling true multi-turn conversation continuity.
  *
  * skills: false — Hermes does not currently have wired-up skills support.
  *
@@ -22,7 +24,7 @@ import type { ProviderCapabilities } from '../types';
  * compliance the way Claude's outputFormat does.
  */
 export const HERMES_CAPABILITIES: ProviderCapabilities = {
-  sessionResume: false,
+  sessionResume: true,
   mcp: true,
   hooks: false,
   skills: false,

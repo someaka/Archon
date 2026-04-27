@@ -69,6 +69,7 @@ export interface BridgeOptions {
   mcpServers?: AcpMcpServer[];
   skipInit?: boolean; // Skip initialize/session/new — reuse existing session
   existingSessionId?: string; // Session ID to use when skipInit is true
+  keepAlive?: boolean; // Don't kill child process after completion (for session pooling)
 }
 
 // ─── bridgeHermesSession (ACP JSON-RPC 2.0) ────────────────────────────────
@@ -534,8 +535,8 @@ export async function* bridgeHermesSession(
       ...(tokens ? { tokens } : {}),
     });
     // Send session/close notification (fire-and-forget) per ACP spec.
-    // Skip in prompt-only mode to preserve the existing session.
-    if (sessionId && !options.skipInit) {
+    // Skip in prompt-only mode or keepAlive to preserve the existing session.
+    if (sessionId && !options.skipInit && !options.keepAlive) {
       try {
         const data = serializeMessage(
           createNotification(ACP_METHODS.sessionClose, {
@@ -580,8 +581,8 @@ export async function* bridgeHermesSession(
     }
 
     // Ensure the child process is definitely killed if still running.
-    // Skip in prompt-only mode to preserve the existing session.
-    if (!options.skipInit) {
+    // Skip in prompt-only mode or keepAlive to preserve the existing session.
+    if (!options.skipInit && !options.keepAlive) {
       try {
         childProcess.kill('SIGKILL');
       } catch {

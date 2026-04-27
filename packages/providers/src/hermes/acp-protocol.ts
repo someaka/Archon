@@ -247,6 +247,7 @@ export interface SessionUpdateParams {
 export const ACP_METHODS = {
   initialize: 'initialize',
   sessionNew: 'session/new',
+  sessionLoad: 'session/load',
   sessionPrompt: 'session/prompt',
   sessionCancel: 'session/cancel',
   sessionClose: 'session/close',
