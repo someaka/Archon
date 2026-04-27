@@ -86,6 +86,8 @@ function createAcpMock(
     stopReason?: string;
     /** Custom session id. */
     sessionId?: string;
+    /** Custom initialize result (merged with defaults). */
+    initResult?: Record<string, unknown>;
   } = {}
 ): AcpMock {
   const sessionId = options.sessionId ?? 'test-session';
@@ -128,11 +130,17 @@ function createAcpMock(
         const req = JSON.parse(data.trim());
 
         if (req.method === 'initialize') {
+          const initResult = {
+            protocolVersion: 1,
+            agentCapabilities: {},
+            authMethods: [],
+            ...options.initResult,
+          };
           stdout.push(
             JSON.stringify({
               jsonrpc: '2.0',
               id: req.id,
-              result: { protocolVersion: 1, agentCapabilities: {}, authMethods: [] },
+              result: initResult,
             }) + '\n'
           );
         } else if (req.method === 'session/new') {
@@ -938,6 +946,50 @@ describe('bridgeHermesSession', () => {
     expect(closeMsg.params.sessionId).toBe('test-session');
     // Should be a notification (no id field)
     expect(closeMsg.id).toBeUndefined();
+  });
+
+  test('initialize response parses agentCapabilities and agentInfo', async () => {
+    const mock = createAcpMock({
+      initResult: {
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: { embeddedContext: true },
+          mcpCapabilities: { toolDiscovery: true },
+        },
+        agentInfo: { name: 'hermes', title: 'Hermes Agent', version: '1.0.0' },
+        authMethods: [{ type: 'oauth2', name: 'Google' }],
+      },
+    });
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    // Should still complete successfully
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+
+    // Verify debug logs were called with the parsed fields
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loadSession: true,
+        promptCapabilities: expect.objectContaining({ embeddedContext: true }),
+        mcpCapabilities: expect.objectContaining({ toolDiscovery: true }),
+      }),
+      'acp.initialize.agent_capabilities'
+    );
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: 'hermes',
+        title: 'Hermes Agent',
+        version: '1.0.0',
+      }),
+      'acp.initialize.agent_info'
+    );
+    expect(mockLogger.debug).toHaveBeenCalledWith(
+      expect.objectContaining({
+        authMethods: [{ type: 'oauth2', name: 'Google' }],
+      }),
+      'acp.initialize.auth_methods'
+    );
   });
 });
 
