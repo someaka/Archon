@@ -2,7 +2,7 @@ import { isAbsolute } from 'node:path';
 
 import type { ChildProcess } from 'node:child_process';
 
-import type { MessageChunk } from '../types';
+import type { MessageChunk, TokenUsage } from '../types';
 import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
 import {
   ACP_METHODS,
@@ -21,6 +21,20 @@ import { createLazyLogger } from '../utils/lazy-logger';
 import { BUNDLED_VERSION } from '@archon/paths';
 
 const getLog = createLazyLogger('provider.hermes.event-bridge');
+
+// ─── ACP usage normalization ──────────────────────────────────────────────
+
+export function normalizeAcpUsage(usage: Record<string, unknown>): TokenUsage | undefined {
+  const input = usage.inputTokens;
+  const output = usage.outputTokens;
+  if (typeof input !== 'number' || typeof output !== 'number') return undefined;
+  const total = usage.totalTokens;
+  return {
+    input,
+    output,
+    ...(typeof total === 'number' ? { total } : {}),
+  };
+}
 
 // ─── Bridge options ─────────────────────────────────────────────────────────
 
@@ -488,14 +502,17 @@ export async function* bridgeHermesSession(
       throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
     }
     // 4. Emit terminal result
-    const stopReason =
-      'result' in promptResp
-        ? ((promptResp.result as Record<string, unknown>).stopReason as string | undefined)
-        : undefined;
+    const result =
+      'result' in promptResp ? (promptResp.result as Record<string, unknown>) : undefined;
+    const stopReason = result?.stopReason as string | undefined;
+    const tokens = result?.usage
+      ? normalizeAcpUsage(result.usage as Record<string, unknown>)
+      : undefined;
     emitTerminal({
       type: 'result',
       sessionId,
       stopReason,
+      ...(tokens ? { tokens } : {}),
     });
     // Send session/close notification (fire-and-forget) per ACP spec.
     if (sessionId) {
