@@ -1,4 +1,7 @@
 import { spawn } from 'child_process';
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync, existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 
 import type {
   IAgentProvider,
@@ -108,11 +111,50 @@ export class HermesProvider implements IAgentProvider {
     // 3. Find the hermes binary. Config override wins; falls back to PATH.
     const hermesBinary = (await resolveHermesBinary(config.hermesBinaryPath)) ?? 'hermes';
 
-    // 3a. If workflow/node specifies a model, pass it as HERMES_MODEL so Hermes
-    // uses that exact model instead of its own default.
+    // 3a. If workflow/node specifies a model, create a temporary HERMES_HOME
+    // with a config.yaml override. This is the production mechanism for
+    // per-node model selection — HERMES_MODEL env var does NOT work in ACP mode,
+    // and session/new does not accept a model param (ACP spec).
     const modelEnv: Record<string, string> = {};
+    let tempHermesHome: string | undefined;
     if (options?.model) {
-      modelEnv.HERMES_MODEL = options.model;
+      tempHermesHome = mkdtempSync(join(tmpdir(), 'hermes-archon-'));
+      // Escape model string to prevent YAML injection
+      const escapedModel = options.model
+        .replace(/\\/g, '\\\\')
+        .replace(/"/g, '\\"')
+        .replace(/\n/g, '\\n')
+        .replace(/\r/g, '\\r');
+      writeFileSync(join(tempHermesHome, 'config.yaml'), `model: "${escapedModel}"\n`);
+      // Symlink .env for API keys
+      const realHermesHome = join(process.env.HOME || '/root', '.hermes');
+      const realEnv = join(realHermesHome, '.env');
+      if (existsSync(realEnv)) {
+        try {
+          symlinkSync(realEnv, join(tempHermesHome, '.env'));
+        } catch {
+          /* ignore */
+        }
+      }
+      // Symlink skills directory
+      const realSkills = join(realHermesHome, 'skills');
+      if (existsSync(realSkills)) {
+        try {
+          symlinkSync(realSkills, join(tempHermesHome, 'skills'));
+        } catch {
+          /* ignore */
+        }
+      }
+      // Symlink auth.json for OAuth credentials
+      const realAuth = join(realHermesHome, 'auth.json');
+      if (existsSync(realAuth)) {
+        try {
+          symlinkSync(realAuth, join(tempHermesHome, 'auth.json'));
+        } catch {
+          /* ignore */
+        }
+      }
+      modelEnv.HERMES_HOME = tempHermesHome;
     }
 
     // 3b. Pre-flight check — verify the binary is executable and responds to --version.
@@ -162,6 +204,14 @@ export class HermesProvider implements IAgentProvider {
     } finally {
       // Ensure bridge cleanup runs (SIGKILL child process) even on timeout
       void bridge.return(undefined as unknown as IteratorResult<MessageChunk>);
+      // Clean up temp HERMES_HOME directory to prevent leaks
+      if (tempHermesHome) {
+        try {
+          rmSync(tempHermesHome, { recursive: true, force: true });
+        } catch {
+          /* ignore */
+        }
+      }
     }
   }
 }
