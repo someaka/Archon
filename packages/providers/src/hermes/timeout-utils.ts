@@ -12,11 +12,14 @@ export async function* withFirstEventTimeout<T>(
 
   let first = true;
   while (true) {
-    const result = first ? await Promise.race([gen.next(), timer]) : await gen.next();
-
-    if (first && timerHandle !== undefined) {
-      clearTimeout(timerHandle);
-      timerHandle = undefined;
+    let result;
+    try {
+      result = first ? await Promise.race([gen.next(), timer]) : await gen.next();
+    } finally {
+      if (first && timerHandle !== undefined) {
+        clearTimeout(timerHandle);
+        timerHandle = undefined;
+      }
     }
 
     if (result.done) return;

@@ -19,7 +19,7 @@ const getLog = createLazyLogger('provider.hermes');
 
 const MAX_TIMEOUT_MS = 300_000; // 5 minutes
 
-function getFirstEventTimeoutMs(): number {
+export function getFirstEventTimeoutMs(): number {
   const raw = process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
   if (raw) {
     const parsed = Number(raw);
@@ -128,22 +128,23 @@ export class HermesProvider implements IAgentProvider {
     // 4. Spawn `hermes acp` with piped stdio.
     const child = spawn(hermesBinary, ['acp'], {
       cwd: session.cwd,
-      env: { ...process.env, ...session.env },
+      env: session.env,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     // 5. Bridge the ACP session — yield all chunks from the child process.
+    const bridge = bridgeHermesSession(
+      child,
+      {
+        prompt,
+        cwd: session.cwd,
+        systemPrompt: options?.systemPrompt,
+      },
+      options?.abortSignal
+    );
     try {
       yield* withFirstEventTimeout(
-        bridgeHermesSession(
-          child,
-          {
-            prompt,
-            cwd: session.cwd,
-            systemPrompt: options?.systemPrompt,
-          },
-          options?.abortSignal
-        ),
+        bridge,
         getFirstEventTimeoutMs(),
         `hermes acp cwd=${session.cwd}`
       );
@@ -151,6 +152,9 @@ export class HermesProvider implements IAgentProvider {
     } catch (err) {
       getLog().error({ err }, 'hermes.query_failed');
       throw err;
+    } finally {
+      // Ensure bridge cleanup runs (SIGKILL child process) even on timeout
+      void bridge.return(undefined as unknown as IteratorResult<MessageChunk>);
     }
   }
 }

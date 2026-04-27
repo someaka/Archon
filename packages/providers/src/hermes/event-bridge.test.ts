@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { beforeEach, describe, expect, mock, test } from 'bun:test';
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
 
@@ -13,7 +13,7 @@ mock.module('@archon/paths', () => ({
   BUNDLED_VERSION: 'dev',
 }));
 
-import { bridgeHermesSession, type BridgeOptions } from './event-bridge';
+import { bridgeHermesSession, redactSecrets, type BridgeOptions } from './event-bridge';
 import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
 import type { ChildProcess } from 'child_process';
 
@@ -162,7 +162,6 @@ function createAcpMock(
   fauxProcess.killed = false;
 
   fauxProcess.kill = (signal?: NodeJS.Signals | number): boolean => {
-    const sig = typeof signal === 'number' ? String(signal) : (signal ?? 'SIGTERM');
     fauxProcess.killed = true;
     if (typeof signal === 'string') {
       queueMicrotask(() => fauxProcess.emit('exit', null, signal));
@@ -295,8 +294,6 @@ describe('bridgeHermesSession', () => {
     mockLogger.trace.mockClear();
     mockLogger.child.mockClear();
   });
-
-  afterEach(() => {});
 
   // ── Happy path ──────────────────────────────────────────────────────────
 
@@ -501,5 +498,41 @@ describe('bridgeHermesSession', () => {
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
     expect(resultChunks).toHaveLength(1);
+  });
+});
+
+describe('redactSecrets', () => {
+  test('redacts key=value pattern', () => {
+    expect(redactSecrets('key=sk-abc123')).toBe('key=[REDACTED]');
+  });
+
+  test('redacts api_key in JSON', () => {
+    expect(redactSecrets('{"api_key": "secret123"}')).toBe('{"api_key":"[REDACTED]"}');
+  });
+
+  test('redacts OPENAI_API_KEY= pattern', () => {
+    expect(redactSecrets('OPENAI_API_KEY=sk-abc123')).toBe('OPENAI_API_KEY=[REDACTED]');
+  });
+
+  test('redacts Authorization header', () => {
+    expect(redactSecrets('Authorization: Bearer token123')).toBe(
+      'Authorization: [REDACTED] token123'
+    );
+  });
+
+  test('redacts ANTHROPIC_API_KEY', () => {
+    expect(redactSecrets('ANTHROPIC_API_KEY=sk-ant-abc')).toBe('ANTHROPIC_API_KEY=[REDACTED]');
+  });
+
+  test('preserves non-secret content', () => {
+    expect(redactSecrets('normal log message')).toBe('normal log message');
+  });
+
+  test('redacts multiple secrets in one line', () => {
+    const input = 'key=abc token=xyz normal';
+    const result = redactSecrets(input);
+    expect(result).toContain('key=[REDACTED]');
+    expect(result).toContain('token=[REDACTED]');
+    expect(result).toContain('normal');
   });
 });

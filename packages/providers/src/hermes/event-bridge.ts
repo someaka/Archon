@@ -1,6 +1,6 @@
-import { isAbsolute } from 'path';
+import { isAbsolute } from 'node:path';
 
-import type { ChildProcess } from 'child_process';
+import type { ChildProcess } from 'node:child_process';
 
 import type { MessageChunk } from '../types';
 import { AsyncQueue, type BridgeQueueItem } from '../utils/async-queue';
@@ -26,10 +26,15 @@ const getLog = createLazyLogger('provider.hermes.event-bridge');
 const REQUEST_TIMEOUT_MS = 30000;
 const MAX_LINE_BUFFER_LENGTH = 1024 * 1024; // 1 MiB
 
-function redactSecrets(text: string): string {
+export function redactSecrets(text: string): string {
   return text
     .replace(/\b(key|token|api_key|password|secret|auth)\b=\S+/gi, '$1=[REDACTED]')
-    .replace(/"(key|token|api_key|password|secret|auth)":\s*"[^"]*/gi, '"$1":"[REDACTED]');
+    .replace(/"(key|token|api_key|password|secret|auth)":\s*"[^"]*/gi, '"$1":"[REDACTED]')
+    .replace(
+      /\b(OPENAI_API_KEY|ANTHROPIC_API_KEY|AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|GITHUB_TOKEN|NPM_TOKEN|DATABASE_URL|POSTGRES_PASSWORD)=\S+/gi,
+      '$1=[REDACTED]'
+    )
+    .replace(/Authorization:\s*\S+/gi, 'Authorization: [REDACTED]');
 }
 
 /** Options passed to bridgeHermesSession for ACP request construction. */
@@ -165,6 +170,11 @@ export async function* bridgeHermesSession(
               kind: 'chunk',
               chunk: { type: 'thinking', content: update.content.text },
             });
+          } else {
+            getLog().debug(
+              { sessionUpdate: (update as Record<string, unknown>).sessionUpdate },
+              'acp.unrecognized_session_update'
+            );
           }
         }
       }
@@ -221,6 +231,9 @@ export async function* bridgeHermesSession(
         isError: true,
         errors: [`Hermes ACP terminated by signal ${signal}`],
       });
+    } else {
+      // Clean exit (code 0 or null) — reject any pending request to avoid 30s timeout
+      rejectPending('Hermes ACP process exited unexpectedly');
     }
 
     queue.push({ kind: 'done' });
@@ -298,6 +311,7 @@ export async function* bridgeHermesSession(
 
   // ── Send ACP requests sequentially ─────────────────────────────────────
   const idGen = createAcpIdGenerator();
+
   async function sendRequest(req: JsonRpcRequest): Promise<JsonRpcMessage> {
     return Promise.race([
       new Promise<JsonRpcMessage>((resolve, reject) => {
@@ -308,6 +322,10 @@ export async function* bridgeHermesSession(
           reject(new Error('Hermes ACP child process stdin is not available'));
           return;
         }
+        childProcess.stdin.once('error', err => {
+          getLog().warn({ err }, 'acp.stdin_error');
+          reject(new Error(`Hermes ACP stdin error: ${err.message}`));
+        });
         const data = serializeMessage(req);
         const canWrite = childProcess.stdin.write(data);
         if (!canWrite) {
@@ -335,17 +353,24 @@ export async function* bridgeHermesSession(
       ACP_METHODS.initialize,
       {
         protocolVersion: 1,
-        clientCapabilities: {},
+        clientCapabilities: {
+          fs: { readTextFile: false, writeTextFile: false },
+          terminal: false,
+        },
         clientInfo: { name: 'archon', version: BUNDLED_VERSION },
       },
       idGen
     );
     const initResp = await sendRequest(initReq);
+    if ('error' in initResp) {
+      const err = initResp.error as { code: number; message: string };
+      throw new Error(`ACP initialize failed: ${err.message} (code ${err.code})`);
+    }
     if (
       'result' in initResp &&
-      typeof (initResp.result as Record<string, unknown>).protocol_version === 'number'
+      typeof (initResp.result as Record<string, unknown>).protocolVersion === 'number'
     ) {
-      const protoVersion = (initResp.result as Record<string, unknown>).protocol_version as number;
+      const protoVersion = (initResp.result as Record<string, unknown>).protocolVersion as number;
       if (protoVersion !== 1) {
         throw new Error(
           `Hermes ACP protocol version ${protoVersion} is not supported. Only version 1 is supported.`
@@ -358,15 +383,22 @@ export async function* bridgeHermesSession(
       ACP_METHODS.sessionNew,
       {
         cwd: options.cwd,
-        mcpServers: [],
+        mcpServers: [], // required by ACP schema; mcp capability is false so no servers are configured
       },
       idGen
     );
     const sessionResp = await sendRequest(sessionReq);
-    if ('result' in sessionResp) {
-      sessionId = (sessionResp.result as Record<string, unknown>).sessionId as string;
+    if ('error' in sessionResp) {
+      const err = sessionResp.error as { code: number; message: string };
+      throw new Error(`ACP session/new failed: ${err.message} (code ${err.code})`);
     }
-    if (!sessionId || typeof sessionId !== 'string' || sessionId.length === 0) {
+    if ('result' in sessionResp) {
+      const result = sessionResp.result as Record<string, unknown>;
+      if (typeof result.sessionId === 'string') {
+        sessionId = result.sessionId;
+      }
+    }
+    if (!sessionId) {
       throw new Error('Hermes ACP did not return a valid sessionId');
     }
 
@@ -387,11 +419,14 @@ export async function* bridgeHermesSession(
       idGen
     );
     const promptResp = await sendRequest(promptReq);
-
+    if ('error' in promptResp) {
+      const err = promptResp.error as { code: number; message: string };
+      throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
+    }
     // 4. Emit terminal result
     const stopReason =
       'result' in promptResp
-        ? ((promptResp.result as Record<string, unknown>).stopReason as string)
+        ? ((promptResp.result as Record<string, unknown>).stopReason as string | undefined)
         : undefined;
     emitTerminal({
       type: 'result',

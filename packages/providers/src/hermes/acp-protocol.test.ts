@@ -5,6 +5,7 @@ import {
   parseMessage,
   serializeMessage,
   createAcpIdGenerator,
+  isSessionUpdateParams,
 } from './acp-protocol';
 
 describe('ACP protocol', () => {
@@ -48,8 +49,15 @@ describe('ACP protocol', () => {
     expect(parseMessage('{"not":"jsonrpc"}')).toBeNull();
   });
 
-  test('parseMessage rejects response with non-numeric id', () => {
+  test('parseMessage accepts response with string id (JSON-RPC 2.0)', () => {
     const line = '{"jsonrpc":"2.0","id":"abc","result":{}}';
+    const msg = parseMessage(line);
+    expect(msg).not.toBeNull();
+    expect(msg).toHaveProperty('id', 'abc');
+  });
+
+  test('parseMessage rejects response with non-string-non-number id', () => {
+    const line = '{"jsonrpc":"2.0","id":true,"result":{}}';
     expect(parseMessage(line)).toBeNull();
   });
 
@@ -73,5 +81,91 @@ describe('ACP protocol', () => {
     const serialized = JSON.parse(serializeMessage(notif).trim());
     expect(serialized.id).toBeUndefined();
     expect(serialized.method).toBe('session/cancel');
+  });
+
+  test('AcpIdGenerator wraps at MAX_SAFE_INTEGER', () => {
+    const gen = createAcpIdGenerator(Number.MAX_SAFE_INTEGER);
+    const lastId = gen.next();
+    expect(lastId).toBe(Number.MAX_SAFE_INTEGER);
+    const wrappedId = gen.next();
+    expect(wrappedId).toBe(1);
+  });
+
+  test('parseMessage returns null for empty string', () => {
+    expect(parseMessage('')).toBeNull();
+  });
+
+  test('parseMessage returns null for whitespace-only', () => {
+    expect(parseMessage('   ')).toBeNull();
+  });
+
+  test('parseMessage returns null for error with null error object', () => {
+    expect(parseMessage('{"jsonrpc":"2.0","id":1,"error":null}')).toBeNull();
+  });
+
+  test('parseMessage accepts notification with no params', () => {
+    const msg = parseMessage('{"jsonrpc":"2.0","method":"session/update"}');
+    expect(msg).not.toBeNull();
+    if (msg && 'method' in msg) {
+      expect(msg.method).toBe('session/update');
+      expect(msg.params).toBeUndefined();
+    }
+  });
+});
+
+describe('isSessionUpdateParams', () => {
+  test('accepts valid agent_message_chunk', () => {
+    const input = {
+      sessionId: 'abc',
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+    };
+    expect(isSessionUpdateParams(input)).toBe(true);
+  });
+
+  test('accepts valid agent_thought_chunk', () => {
+    const input = {
+      sessionId: 'abc',
+      update: { sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } },
+    };
+    expect(isSessionUpdateParams(input)).toBe(true);
+  });
+
+  test('rejects missing sessionId', () => {
+    const input = {
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+    };
+    expect(isSessionUpdateParams(input)).toBe(false);
+  });
+
+  test('rejects non-string sessionId', () => {
+    const input = {
+      sessionId: 123,
+      update: { sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'hi' } },
+    };
+    expect(isSessionUpdateParams(input)).toBe(false);
+  });
+
+  test('rejects unknown sessionUpdate value', () => {
+    const input = {
+      sessionId: 'abc',
+      update: { sessionUpdate: 'unknown_type', content: { type: 'text', text: 'hi' } },
+    };
+    expect(isSessionUpdateParams(input)).toBe(false);
+  });
+
+  test('rejects null input', () => {
+    expect(isSessionUpdateParams(null)).toBe(false);
+  });
+
+  test('rejects undefined input', () => {
+    expect(isSessionUpdateParams(undefined)).toBe(false);
+  });
+
+  test('rejects missing update', () => {
+    expect(isSessionUpdateParams({ sessionId: 'abc' })).toBe(false);
+  });
+
+  test('rejects non-object update', () => {
+    expect(isSessionUpdateParams({ sessionId: 'abc', update: 'not-an-object' })).toBe(false);
   });
 });

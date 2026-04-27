@@ -23,14 +23,14 @@ export interface JsonRpcRequest {
 /** JSON-RPC 2.0 success response from Hermes. */
 export interface JsonRpcSuccess {
   jsonrpc: '2.0';
-  id: number;
+  id: string | number;
   result: unknown;
 }
 
 /** JSON-RPC 2.0 error response from Hermes. */
 export interface JsonRpcError {
   jsonrpc: '2.0';
-  id: number;
+  id: string | number;
   error: { code: number; message: string; data?: unknown };
 }
 
@@ -116,13 +116,13 @@ export function parseMessage(line: string): JsonRpcMessage | null {
 
       // Success response: has result, id must be a number
       if ('result' in record) {
-        if (typeof record.id !== 'number') return null;
+        if (typeof record.id !== 'number' && typeof record.id !== 'string') return null;
         return obj as JsonRpcSuccess;
       }
 
       // Error response: has error, id must be a number, error must have numeric code
       if ('error' in record) {
-        if (typeof record.id !== 'number') return null;
+        if (typeof record.id !== 'number' && typeof record.id !== 'string') return null;
         const errorObj = record.error;
         if (
           !errorObj ||

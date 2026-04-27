@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
 import { EventEmitter } from 'events';
 import { Readable, Writable } from 'stream';
 
@@ -37,7 +37,7 @@ mock.module('./binary-resolver', () => ({
 }));
 
 // Import AFTER mocks are set — module resolution freezes the mocks.
-import { HermesProvider } from './provider';
+import { HermesProvider, getFirstEventTimeoutMs } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
 import type { ChildProcess } from 'child_process';
 
@@ -126,7 +126,6 @@ function createAcpMock(): AcpMock {
   fauxProcess.killed = false;
 
   fauxProcess.kill = (signal?: NodeJS.Signals | number): boolean => {
-    const sig = typeof signal === 'number' ? String(signal) : (signal ?? 'SIGTERM');
     fauxProcess.killed = true;
     if (typeof signal === 'string') {
       queueMicrotask(() => fauxProcess.emit('exit', null, signal));
@@ -294,7 +293,7 @@ describe('HermesProvider', () => {
     const { chunks } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
 
     const resultChunks = chunks.filter(
-      (c): c is { type: 'result'; isError?: boolean } =>
+      (c): c is { type: 'result'; isError?: boolean; errors?: string[] } =>
         typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
     );
     expect(resultChunks.length).toBeGreaterThan(0);
@@ -302,6 +301,14 @@ describe('HermesProvider', () => {
       type: 'result',
       isError: true,
     });
+    expect(
+      chunks.some(
+        c =>
+          (c as { type: string; isError?: boolean; errors?: string[] }).type === 'result' &&
+          (c as { isError?: boolean }).isError &&
+          (c as { errors?: string[] }).errors?.some(e => e.includes('spawn'))
+      )
+    ).toBe(true);
   });
 
   test('resume session is accepted without throwing', async () => {
@@ -347,5 +354,49 @@ describe('HermesProvider', () => {
     expect(caps.thinkingControl).toBe(false);
     expect(caps.fallbackModel).toBe(false);
     expect(caps.sandbox).toBe(false);
+  });
+});
+
+// ─── getFirstEventTimeoutMs ─────────────────────────────────────────────────
+
+describe('getFirstEventTimeoutMs', () => {
+  const originalEnv = process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
+    } else {
+      process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = originalEnv;
+    }
+  });
+
+  test('returns default 60000 when env not set', () => {
+    delete process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
+    expect(getFirstEventTimeoutMs()).toBe(60_000);
+  });
+
+  test('returns env value when valid', () => {
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '120000';
+    expect(getFirstEventTimeoutMs()).toBe(120_000);
+  });
+
+  test('caps at MAX_TIMEOUT_MS (300000)', () => {
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '999999';
+    expect(getFirstEventTimeoutMs()).toBe(300_000);
+  });
+
+  test('returns default for 0', () => {
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '0';
+    expect(getFirstEventTimeoutMs()).toBe(60_000);
+  });
+
+  test('returns default for negative', () => {
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '-5000';
+    expect(getFirstEventTimeoutMs()).toBe(60_000);
+  });
+
+  test('returns default for non-numeric', () => {
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = 'abc';
+    expect(getFirstEventTimeoutMs()).toBe(60_000);
   });
 });

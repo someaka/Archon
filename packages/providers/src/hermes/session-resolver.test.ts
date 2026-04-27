@@ -109,4 +109,12 @@ describe('resolveHermesSession', () => {
     expect(result.env).toBeDefined();
     expect(result.cwd).toBe('/tmp/project');
   });
+
+  test('throws when cwd does not exist', () => {
+    expect(() => resolveHermesSession({ cwd: '/nonexistent/path/xyz' })).toThrow('does not exist');
+  });
+
+  test('throws when cwd is a file, not a directory', () => {
+    expect(() => resolveHermesSession({ cwd: '/etc/hosts' })).toThrow('not a directory');
+  });
 });

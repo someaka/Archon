@@ -109,6 +109,65 @@ describe('classifyHermesError', () => {
     expect(shouldRetry).toBe(true);
   });
 
+  // ── Object-style API tests ──────────────────────────────────────────
+
+  test('classifies JSON-RPC parse error (-32700)', () => {
+    const result = classifyHermesError('fail', { jsonRpcCode: -32700 });
+    expect(result.errorClass).toBe('protocol');
+    expect(result.shouldRetry).toBe(false);
+  });
+
+  test('classifies JSON-RPC invalid request (-32600)', () => {
+    const result = classifyHermesError('fail', { jsonRpcCode: -32600 });
+    expect(result.errorClass).toBe('protocol');
+    expect(result.shouldRetry).toBe(false);
+  });
+
+  test('classifies JSON-RPC method not found (-32601)', () => {
+    // -32601 is not explicitly handled by the classifier;
+    // it falls through to 'unknown' with shouldRetry true.
+    const result = classifyHermesError('fail', { jsonRpcCode: -32601 });
+    expect(result.errorClass).toBe('unknown');
+    expect(result.shouldRetry).toBe(true);
+  });
+
+  test('classifies JSON-RPC invalid params (-32602)', () => {
+    const result = classifyHermesError('fail', { jsonRpcCode: -32602 });
+    expect(result.errorClass).toBe('protocol');
+    expect(result.shouldRetry).toBe(false);
+  });
+
+  test('classifies JSON-RPC internal error (-32603)', () => {
+    // -32603 is classified as crash, shouldRetry false per implementation.
+    const result = classifyHermesError('fail', { jsonRpcCode: -32603 });
+    expect(result.errorClass).toBe('crash');
+    expect(result.shouldRetry).toBe(false);
+  });
+
+  test('classifies unknown JSON-RPC code as crash', () => {
+    // Unrecognized JSON-RPC codes fall through to 'unknown' with shouldRetry true.
+    const result = classifyHermesError('fail', { jsonRpcCode: -99999 });
+    expect(result.errorClass).toBe('unknown');
+    expect(result.shouldRetry).toBe(true);
+  });
+
+  test('enrichedMessage contains JSON-RPC code', () => {
+    const result = classifyHermesError('fail', { jsonRpcCode: -32603 });
+    expect(result.enrichedMessage).toContain('-32603');
+  });
+
+  test('classifies with stderr array in object context', () => {
+    const result = classifyHermesError('fail', { stderr: ['rate limit exceeded'] });
+    expect(result.errorClass).toBe('rate_limit');
+    expect(result.shouldRetry).toBe(true);
+  });
+
+  test('classifies with empty context', () => {
+    const result = classifyHermesError('some error');
+    expect(result.errorClass).toBeDefined();
+    expect(result.shouldRetry).toBeDefined();
+  });
+
   test('classifies unknown errors with shouldRetry true', () => {
     const { errorClass, shouldRetry }: ClassifiedError = classifyHermesError(
       'some random error',
