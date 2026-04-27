@@ -1,6 +1,6 @@
 ---
 title: AI Assistants
-description: Configure Claude Code, Codex, and Pi as AI assistants for Archon.
+description: Configure Claude Code, Codex, Pi, and Hermes as AI assistants for Archon.
 category: getting-started
 area: clients
 audience: [user]
@@ -9,7 +9,7 @@ sidebar:
   order: 4
 ---
 
-You must configure **at least one** AI assistant. All three can be configured and mixed within workflows.
+You must configure **at least one** AI assistant. All four can be configured and mixed within workflows.
 
 ## Claude Code
 
@@ -401,6 +401,217 @@ Unsupported YAML fields trigger a visible warning from the dag-executor when the
 
 - [Adding a Community Provider](../contributing/adding-a-community-provider/) — the contributor-facing guide for extending Archon with your own provider.
 - [Pi on GitHub](https://github.com/badlogic/pi-mono) — upstream project.
+
+## Hermes (Open-Source Multi-Provider)
+
+**Open-source agent with 15+ LLM providers under a single CLI.** [Hermes Agent](https://github.com/NousResearch/hermes-agent) is an open-source (MIT-licensed) AI coding assistant by Nous Research that connects to Anthropic, OpenAI, Google (Gemini), Groq, Mistral, xAI, OpenRouter, Ollama, LM Studio, Cerebras, Together, Fireworks, and more — all through one unified interface. It supports skills, MCP servers, tool use, and multi-model workflows.
+
+### Install
+
+**pip (Python 3.10+):**
+
+```bash
+pip install hermes-agent
+```
+
+**macOS via Homebrew:**
+
+```bash
+brew install NousResearch/tap/hermes-agent
+```
+
+**Prebuilt binary** (Linux, macOS, Windows):
+
+Download the latest release from [Hermes releases](https://github.com/NousResearch/hermes-agent/releases) and place it on your PATH.
+
+```bash
+# Linux / macOS
+chmod +x hermes
+mv hermes /usr/local/bin/hermes
+
+# Windows: move hermes.exe to a directory on your PATH
+```
+
+See the [Hermes Agent docs](https://hermes-agent.nousresearch.com/docs) for the full install matrix.
+
+### Binary path configuration (compiled binaries only)
+
+Compiled Archon binaries cannot auto-discover Hermes at runtime. Supply the path via either:
+
+1. **Environment variable** (highest precedence):
+   ```ini
+   HERMES_BIN_PATH=/absolute/path/to/hermes
+   ```
+2. **Config file** (`~/.archon/config.yaml` or a repo-local `.archon/config.yaml`):
+   ```yaml
+   assistants:
+     hermes:
+       hermesBinaryPath: /absolute/path/to/hermes
+   ```
+
+If neither is set in a compiled binary, Archon throws with install instructions on first Hermes query.
+
+**Typical paths by install method:**
+
+| Install method | Typical executable path |
+|---|---|
+| pip (user) | `~/.local/bin/hermes` |
+| pip (virtualenv) | `<venv>/bin/hermes` |
+| Homebrew | `$(brew --prefix)/bin/hermes` |
+| Prebuilt binary | wherever you placed it |
+
+If in doubt, `which hermes` (macOS/Linux) or `where hermes` (Windows) will resolve the executable on your PATH.
+
+### Authentication Options
+
+Hermes supports two authentication modes. **Global Auth is recommended** — it keeps credentials in `~/.hermes/` and avoids scattering API keys across config files.
+
+#### Option 1: Global Auth (Recommended)
+
+Run `hermes login` to authenticate via browser-based OAuth for any supported provider:
+
+```bash
+hermes login
+# Follow the browser flow — credentials are written to ~/.hermes/auth.json
+```
+
+Then enable global auth in Archon:
+
+```ini
+HERMES_USE_GLOBAL_AUTH=true
+```
+
+This tells Archon to read credentials from `~/.hermes/auth.json` rather than requiring per-key env vars.
+
+#### Option 2: API Keys via `.env`
+
+Set API keys for your chosen provider directly:
+
+```ini
+OPENROUTER_API_KEY=sk-or-...
+# or
+ANTHROPIC_API_KEY=sk-ant-...
+# or
+OPENAI_API_KEY=sk-...
+```
+
+Hermes reads keys from `~/.hermes/.env` (its own home directory) or from the environment. For Archon integration, place keys in your project `.env` and they are passed through.
+
+### Hermes Configuration Options
+
+You can configure Hermes's behavior in `.archon/config.yaml`:
+
+```yaml
+assistants:
+  hermes:
+    model: gpt-4.1                        # default model (any provider model ID)
+    provider: openrouter                   # default provider
+    endpoint: https://custom.endpoint.com  # optional custom endpoint (e.g. Ollama)
+    globalAuth: true                       # use ~/.hermes/auth.json credentials
+    hermesBinaryPath: /absolute/path/to/hermes  # optional; env var takes precedence
+```
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `model` | string | `gpt-4.1` | Default model ID for all Hermes nodes |
+| `provider` | string | `openrouter` | LLM provider (`openrouter`, `anthropic`, `openai`, `ollama`, etc.) |
+| `endpoint` | string | *(none)* | Custom API endpoint URL (for Ollama, LM Studio, self-hosted) |
+| `globalAuth` | boolean | `false` | Use `~/.hermes/auth.json` for authentication |
+| `hermesBinaryPath` | string | *(auto-detected)* | Absolute path to the Hermes binary |
+
+### Per-node model override in workflows
+
+Each workflow node can specify its own `model` and `provider`, mixing Hermes with other assistants in a single workflow:
+
+```yaml
+name: mixed-models
+nodes:
+  - id: plan
+    provider: claude
+    model: sonnet
+    prompt: "Create a detailed plan for the feature."
+
+  - id: implement
+    provider: hermes
+    model: qwen3-coder
+    prompt: "Implement the plan."
+    effort: high
+
+  - id: review
+    provider: hermes
+    model: claude-sonnet-4-20250514   # routed via OpenRouter
+    prompt: "Review the implementation."
+```
+
+**How per-node overrides work:** When a Hermes node specifies a model different from the global config, Archon creates a temporary `HERMES_HOME` directory and symlinks `auth.json`, `.env`, and `skills/` from your real `~/.hermes/`. This isolates the override so the model change only affects that node.
+
+### Workflow example
+
+A full mixed-provider workflow using Claude for planning and Hermes for implementation:
+
+```yaml
+name: feature-workflow
+
+nodes:
+  - id: plan
+    provider: claude
+    model: sonnet
+    prompt: |
+      Analyze the requirements and create a detailed implementation plan.
+      Focus on architecture and file structure.
+
+  - id: implement
+    provider: hermes
+    model: qwen3-coder
+    prompt: |
+      Implement the plan from the previous step.
+      Write clean, well-documented code.
+    effort: high
+    allowed_tools: [read, write, bash, grep]
+
+  - id: test
+    provider: hermes
+    model: gpt-4.1                      # routed via OpenRouter
+    prompt: |
+      Write comprehensive tests for the implementation.
+    effort: medium
+```
+
+See [hermes-multi-model.yaml](../examples/hermes-multi-model.yaml) for a standalone, runnable version.
+
+### Hermes capabilities
+
+| Feature | Support | YAML field |
+|---|---|---|
+| Multi-provider (15+ LLM backends) | ✅ | `provider:` per node or in config |
+| Session resume | ❌ | Hermes is stateless per invocation |
+| Tool restrictions | ✅ | `allowed_tools` / `denied_tools` (read, write, bash, grep, glob, edit) |
+| Thinking level | ✅ | `effort: low\|medium\|high` |
+| Skills | ✅ | `skills: [name]` (from `~/.hermes/skills/`) |
+| Inline sub-agents | ❌ | not supported |
+| System prompt override | ✅ | `systemPrompt:` |
+| MCP servers | ✅ | Hermes has native MCP support |
+| Codebase env vars (`envInjection`) | ✅ | `.archon/config.yaml` `env:` section |
+| Custom endpoints (Ollama, LM Studio) | ✅ | `endpoint:` field |
+| Global auth via `hermes login` | ✅ | `globalAuth: true` |
+| Structured output | ✅ (best-effort) | `output_format:` — JSON parsed from response text |
+| Cost limits (`maxBudgetUsd`) | ❌ | tracked in result chunk, not enforced |
+| Fallback model | ❌ | not native |
+| Sandbox | ❌ | not native |
+
+### Set as Default
+
+If you want Hermes to be the default AI assistant for new conversations without codebase context, set this environment variable:
+
+```ini
+DEFAULT_AI_ASSISTANT=hermes
+```
+
+### See also
+
+- [Hermes Agent documentation](https://hermes-agent.nousresearch.com/docs) — full reference.
+- [Hermes on GitHub](https://github.com/NousResearch/hermes-agent) — source code and releases.
+- [hermes-multi-model.yaml](../examples/hermes-multi-model.yaml) — standalone workflow example with mixed providers.
 
 ## How Assistant Selection Works
 

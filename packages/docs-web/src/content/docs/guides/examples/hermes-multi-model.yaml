@@ -1,0 +1,95 @@
+# hermes-multi-model.yaml
+#
+# Standalone example: mixed Claude + Hermes workflow with per-node model overrides.
+# Demonstrates routing different tasks to different providers and models.
+#
+# Prerequisites:
+#   - Claude Code installed and authenticated (for the plan node)
+#   - Hermes installed: pip install hermes-agent
+#   - At least one of:
+#       HERMES_USE_GLOBAL_AUTH=true  (after running: hermes login)
+#       OPENROUTER_API_KEY=sk-or-...
+#       OPENAI_API_KEY=sk-...
+#       ANTHROPIC_API_KEY=sk-ant-...
+#
+# Usage:
+#   archon run hermes-multi-model
+#   # or
+#   archon run --file path/to/hermes-multi-model.yaml
+
+name: hermes-multi-model
+description: >
+  Mixed-provider workflow combining Claude (planning) with Hermes
+  (implementation via Ollama and review via OpenRouter). Demonstrates
+  per-node model overrides and multi-provider flexibility.
+
+nodes:
+  # ── Node 1: Architecture planning with Claude ──────────────────────
+  - id: plan
+    provider: claude
+    model: sonnet
+    prompt: |
+      Analyze the project requirements and produce a detailed implementation plan:
+      - List every file that needs to be created or modified
+      - Define the public API surface for each module
+      - Identify edge cases and error-handling requirements
+      - Note any dependencies or configuration changes
+
+      Output a structured checklist that the implementation node can follow.
+
+  # ── Node 2: Implementation with local Ollama via Hermes ────────────
+  - id: implement
+    provider: hermes
+    model: qwen3-coder
+    prompt: |
+      Using the plan from the previous node, implement every file and module.
+      Follow these rules:
+      - Write clean, idiomatic code with clear comments
+      - Handle all edge cases identified in the plan
+      - Keep functions small and focused
+      - Use meaningful variable and function names
+    effort: high
+    allowed_tools: [read, write, bash, grep, glob]
+
+  # ── Node 3: Code review with Hermes via OpenRouter ─────────────────
+  - id: review
+    provider: hermes
+    model: claude-sonnet-4-20250514
+    prompt: |
+      Review all files created or modified by the implement node.
+      Check for:
+      - Correctness and completeness against the plan
+      - Code quality, readability, and maintainability
+      - Security issues (injection, path traversal, secrets in code)
+      - Missing error handling or edge cases
+      - Test coverage gaps
+
+      Output a structured review with severity ratings:
+      [CRITICAL] / [WARNING] / [INFO] for each finding.
+
+  # ── Node 4: Generate tests with Hermes (OpenAI) ────────────────────
+  - id: test
+    provider: hermes
+    model: gpt-4.1
+    prompt: |
+      Based on the implementation and review feedback, write comprehensive tests:
+      - Unit tests for every public function
+      - Integration tests for module boundaries
+      - Edge-case tests identified in the review
+      - Aim for >90% line coverage
+
+      Use the project's existing test framework and conventions.
+    effort: medium
+
+  # ── Node 5: Fix issues found in review ──────────────────────────────
+  - id: fix
+    provider: hermes
+    model: qwen3-coder
+    prompt: |
+      Address all [CRITICAL] and [WARNING] findings from the review node.
+      For each finding:
+      - Apply the fix
+      - Update related tests if needed
+      - Add a brief comment explaining the change
+    effort: high
+    allowed_tools: [read, write, bash, grep, glob, edit]
