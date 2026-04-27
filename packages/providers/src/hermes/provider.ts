@@ -108,7 +108,14 @@ export class HermesProvider implements IAgentProvider {
     // 3. Find the hermes binary. Config override wins; falls back to PATH.
     const hermesBinary = (await resolveHermesBinary(config.hermesBinaryPath)) ?? 'hermes';
 
-    // 3a. Pre-flight check — verify the binary is executable and responds to --version.
+    // 3a. If workflow/node specifies a model, pass it as HERMES_MODEL so Hermes
+    // uses that exact model instead of its own default.
+    const modelEnv: Record<string, string> = {};
+    if (options?.model) {
+      modelEnv.HERMES_MODEL = options.model;
+    }
+
+    // 3b. Pre-flight check — verify the binary is executable and responds to --version.
     const isValid = await verifyHermesBinary(hermesBinary);
     if (!isValid) {
       throw new Error(
@@ -128,7 +135,7 @@ export class HermesProvider implements IAgentProvider {
     // 4. Spawn `hermes acp` with piped stdio.
     const child = spawn(hermesBinary, ['acp'], {
       cwd: session.cwd,
-      env: session.env,
+      env: { ...session.env, ...modelEnv },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 

@@ -24,6 +24,7 @@ const getLog = createLazyLogger('provider.hermes.event-bridge');
 // ─── Bridge options ─────────────────────────────────────────────────────────
 
 const REQUEST_TIMEOUT_MS = 30000;
+const PROMPT_TIMEOUT_MS = 300_000; // 5 minutes for model inference
 const MAX_LINE_BUFFER_LENGTH = 1024 * 1024; // 1 MiB
 
 export function redactSecrets(text: string): string {
@@ -312,7 +313,10 @@ export async function* bridgeHermesSession(
   // ── Send ACP requests sequentially ─────────────────────────────────────
   const idGen = createAcpIdGenerator();
 
-  async function sendRequest(req: JsonRpcRequest): Promise<JsonRpcMessage> {
+  async function sendRequest(
+    req: JsonRpcRequest,
+    timeoutMs = REQUEST_TIMEOUT_MS
+  ): Promise<JsonRpcMessage> {
     return Promise.race([
       new Promise<JsonRpcMessage>((resolve, reject) => {
         pendingRequestId = req.id;
@@ -340,8 +344,8 @@ export async function* bridgeHermesSession(
           pendingRequestId = undefined;
           requestResolve = undefined;
           requestReject = undefined;
-          reject(new Error(`Hermes ACP request timed out after ${REQUEST_TIMEOUT_MS}ms`));
-        }, REQUEST_TIMEOUT_MS);
+          reject(new Error(`Hermes ACP request timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
         activeTimers.set(req.id, timer);
       }),
     ]);
@@ -418,7 +422,7 @@ export async function* bridgeHermesSession(
       },
       idGen
     );
-    const promptResp = await sendRequest(promptReq);
+    const promptResp = await sendRequest(promptReq, PROMPT_TIMEOUT_MS);
     if ('error' in promptResp) {
       const err = promptResp.error as { code: number; message: string };
       throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
