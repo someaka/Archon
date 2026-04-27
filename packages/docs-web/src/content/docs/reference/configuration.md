@@ -77,6 +77,11 @@ assistants:
     additionalDirectories:
       - /absolute/path/to/other/repo
     # codexBinaryPath: /absolute/path/to/codex  # Optional: Codex CLI path
+  hermes:
+    model: qwen2.5-coder:32b
+    provider: ollama
+    endpoint: http://localhost:11434/v1
+    # hermesBinaryPath: /absolute/path/to/hermes  # Optional: Hermes CLI path
 
 # Streaming preferences per platform
 streaming:
@@ -113,6 +118,10 @@ assistants:
   codex:
     model: gpt-5.3-codex
     webSearchMode: live
+  hermes:
+    model: qwen2.5-coder:32b
+    provider: ollama
+    endpoint: http://localhost:11434/v1
 
 # Commands configuration
 commands:
@@ -252,6 +261,12 @@ When `CLAUDE_USE_GLOBAL_AUTH` is unset, Archon auto-detects: it uses explicit to
 | `CODEX_ACCESS_TOKEN` | Codex access token | -- |
 | `CODEX_REFRESH_TOKEN` | Codex refresh token | -- |
 | `CODEX_ACCOUNT_ID` | Codex account ID | -- |
+
+### AI Providers -- Hermes
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `HERMES_BINARY_PATH` | Absolute path to the hermes CLI binary. Overrides PATH lookup. | -- |
 
 ### Platform Adapters -- Slack
 

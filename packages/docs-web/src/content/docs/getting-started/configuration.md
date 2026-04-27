@@ -20,6 +20,8 @@ Set these in your shell or `.env` file:
 | `CLAUDE_API_KEY` | No | Anthropic API key for pay-per-use (alternative to global auth) |
 | `CODEX_BIN_PATH` | No | Absolute path to the Codex CLI binary. Overrides auto-detection in compiled Archon builds. |
 | `CODEX_ACCESS_TOKEN` | Yes (for Codex) | Codex access token (see [AI Assistants](/getting-started/ai-assistants/)) |
+| `HERMES_BINARY_PATH` | No | Absolute path to the hermes CLI binary. Overrides PATH lookup. |
+| `DEFAULT_AI_ASSISTANT` | No | Set to `hermes` to make Hermes the default assistant |
 | `DATABASE_URL` | No | PostgreSQL connection string (default: SQLite) |
 | `LOG_LEVEL` | No | `debug`, `info` (default), `warn`, `error` |
 | `PORT` | No | Server port (default: 3090, Docker: 3000) |
@@ -37,6 +39,10 @@ assistants:
   codex:
     model: gpt-5.3-codex
     modelReasoningEffort: medium
+  hermes:
+    model: qwen2.5-coder:32b
+    provider: ollama
+    endpoint: http://localhost:11434/v1
 
 # docs:
 #   path: packages/docs-web/src/content/docs  # Optional: default is docs/
