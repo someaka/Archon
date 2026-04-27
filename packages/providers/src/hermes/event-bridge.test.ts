@@ -912,6 +912,33 @@ describe('bridgeHermesSession', () => {
     expect(error!.message).toContain('absolute cwd');
     expect(error!.message).toContain('relative/path');
   });
+
+  test('sends session/close on normal completion', async () => {
+    const stdinWrites: string[] = [];
+
+    const mock = createAcpMock();
+    const originalWrite = mock.stdin.write.bind(mock.stdin);
+    mock.stdin.write = (chunk: any, ...args: any[]) => {
+      stdinWrites.push(typeof chunk === 'string' ? chunk : chunk.toString());
+      return originalWrite(chunk, ...args);
+    };
+
+    const { chunks } = await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    // Verify normal completion still works
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks).toHaveLength(1);
+    expect(resultChunks[0]).toMatchObject({ type: 'result', sessionId: 'test-session' });
+
+    // Verify session/close was written to stdin
+    const closeWrites = stdinWrites.filter(w => w.includes('session/close'));
+    expect(closeWrites.length).toBeGreaterThan(0);
+    const closeMsg = JSON.parse(closeWrites[0]);
+    expect(closeMsg.method).toBe('session/close');
+    expect(closeMsg.params.sessionId).toBe('test-session');
+    // Should be a notification (no id field)
+    expect(closeMsg.id).toBeUndefined();
+  });
 });
 
 describe('redactSecrets', () => {

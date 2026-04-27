@@ -234,6 +234,7 @@ export const ACP_METHODS = {
   sessionNew: 'session/new',
   sessionPrompt: 'session/prompt',
   sessionCancel: 'session/cancel',
+  sessionClose: 'session/close',
   sessionUpdate: 'session/update',
 } as const;
 

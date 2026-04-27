@@ -413,6 +413,35 @@ export async function* bridgeHermesSession(
       }
     }
 
+    // Log agent capabilities, info, and auth methods from the initialize response
+    if ('result' in initResp) {
+      const result = initResp.result as Record<string, unknown>;
+
+      if (result.agentCapabilities && typeof result.agentCapabilities === 'object') {
+        const caps = result.agentCapabilities as Record<string, unknown>;
+        getLog().debug(
+          {
+            loadSession: caps.loadSession,
+            promptCapabilities: caps.promptCapabilities,
+            mcpCapabilities: caps.mcpCapabilities,
+          },
+          'acp.initialize.agent_capabilities'
+        );
+      }
+
+      if (result.agentInfo && typeof result.agentInfo === 'object') {
+        const info = result.agentInfo as Record<string, unknown>;
+        getLog().debug(
+          { name: info.name, title: info.title, version: info.version },
+          'acp.initialize.agent_info'
+        );
+      }
+
+      if (Array.isArray(result.authMethods)) {
+        getLog().debug({ authMethods: result.authMethods }, 'acp.initialize.auth_methods');
+      }
+    }
+
     // 2. New session
     const sessionReq = createRequest(
       ACP_METHODS.sessionNew,
@@ -468,6 +497,22 @@ export async function* bridgeHermesSession(
       sessionId,
       stopReason,
     });
+    // Send session/close notification (fire-and-forget) per ACP spec.
+    if (sessionId) {
+      try {
+        const data = serializeMessage(
+          createNotification(ACP_METHODS.sessionClose, {
+            sessionId,
+          })
+        );
+        const canWrite = childProcess.stdin?.write(data);
+        if (canWrite === false) {
+          getLog().debug('acp.stdin_backpressure_on_close');
+        }
+      } catch (err) {
+        getLog().warn({ err }, 'acp.stdin_write_failed_on_close');
+      }
+    }
     queue.push({ kind: 'done' });
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
