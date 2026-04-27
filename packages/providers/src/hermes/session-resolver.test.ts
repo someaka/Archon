@@ -1,5 +1,7 @@
-import { beforeEach, describe, expect, mock, test } from 'bun:test';
-
+import { afterEach, beforeEach, describe, expect, mock, test } from 'bun:test';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { createMockLogger } from '../test/mocks/logger';
 
 // ─── Mock @archon/paths logger before import ───────────────────────────────
@@ -14,17 +16,21 @@ mock.module('@archon/paths', () => ({
 import { resolveHermesSession } from './session-resolver';
 
 describe('resolveHermesSession', () => {
+  let tempDir: string;
   beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'hermes-test-'));
     mockLogger.warn.mockClear();
     mockLogger.error.mockClear();
     mockLogger.debug.mockClear();
     mockLogger.info.mockClear();
     mockLogger.child.mockClear();
   });
-
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
   test('basic call with cwd returns context with cwd and env', () => {
-    const result = resolveHermesSession({ cwd: '/tmp/project' });
-    expect(result.cwd).toBe('/tmp/project');
+    const result = resolveHermesSession({ cwd: tempDir });
+    expect(result.cwd).toBe(tempDir);
     expect(result.env).toBeDefined();
     expect(typeof result.env).toBe('object');
     expect(result.sessionId).toBeUndefined();
@@ -32,7 +38,7 @@ describe('resolveHermesSession', () => {
 
   test('env vars are merged into process.env', () => {
     const result = resolveHermesSession({
-      cwd: '/tmp/project',
+      cwd: tempDir,
       env: { HERMES_API_KEY: 'secret-key', CUSTOM_VAR: 'value' },
     });
     expect(result.env.HERMES_API_KEY).toBe('secret-key');
@@ -44,7 +50,7 @@ describe('resolveHermesSession', () => {
   test('provided env overrides process.env', () => {
     const originalPath = process.env.PATH;
     const result = resolveHermesSession({
-      cwd: '/tmp/project',
+      cwd: tempDir,
       env: { PATH: '/custom/path' },
     });
     expect(result.env.PATH).toBe('/custom/path');
@@ -57,10 +63,10 @@ describe('resolveHermesSession', () => {
   test('resumeSessionId returns context without throwing', () => {
     // Hermes doesn't support session resume, but it should not throw
     const result = resolveHermesSession({
-      cwd: '/tmp/project',
+      cwd: tempDir,
       resumeSessionId: 'some-session-id',
     });
-    expect(result.cwd).toBe('/tmp/project');
+    expect(result.cwd).toBe(tempDir);
     expect(result.sessionId).toBeUndefined();
     // A warning may or may not be logged depending on logger state;
     // the key behavior is that the function doesn't throw.
@@ -92,7 +98,7 @@ describe('resolveHermesSession', () => {
 
   test('non-string env values are skipped', () => {
     const result = resolveHermesSession({
-      cwd: '/tmp/project',
+      cwd: tempDir,
       env: { GOOD: 'value', BAD: 123 as unknown as string, ALSO_BAD: null as unknown as string },
     });
     expect(result.env.GOOD).toBe('value');
@@ -103,11 +109,11 @@ describe('resolveHermesSession', () => {
 
   test('empty env object', () => {
     const result = resolveHermesSession({
-      cwd: '/tmp/project',
+      cwd: tempDir,
       env: {},
     });
     expect(result.env).toBeDefined();
-    expect(result.cwd).toBe('/tmp/project');
+    expect(result.cwd).toBe(tempDir);
   });
 
   test('throws when cwd does not exist', () => {
