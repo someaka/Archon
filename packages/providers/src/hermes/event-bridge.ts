@@ -19,8 +19,31 @@ import {
 } from './acp-protocol';
 import { createLazyLogger } from '../utils/lazy-logger';
 import { BUNDLED_VERSION } from '@archon/paths';
+import { classifyHermesError } from './error-classifier';
 
 const getLog = createLazyLogger('provider.hermes.event-bridge');
+
+// ─── JSON-RPC response guards ────────────────────────────────────────────
+
+function assertJsonRpcError(err: unknown): { code: number; message: string } {
+  if (
+    err != null &&
+    typeof err === 'object' &&
+    typeof (err as Record<string, unknown>).code === 'number' &&
+    typeof (err as Record<string, unknown>).message === 'string'
+  ) {
+    return err as { code: number; message: string };
+  }
+  return { code: -1, message: String(err ?? 'unknown error') };
+}
+
+function assertObjectResult(result: unknown): Record<string, unknown> | undefined {
+  if (result === undefined || result === null) return undefined;
+  if (typeof result === 'object' && !Array.isArray(result)) {
+    return result as Record<string, unknown>;
+  }
+  throw new Error(`Expected JSON-RPC result to be an object, got: ${typeof result}`);
+}
 
 // ─── ACP usage normalization ──────────────────────────────────────────────
 
@@ -45,6 +68,19 @@ export function normalizeAcpUsage(usage: Record<string, unknown>): TokenUsage | 
 }
 
 // ─── Bridge options ─────────────────────────────────────────────────────────
+
+// ─── ACP bridge constants ────────────────────────────────────────────────────
+//
+// Timeout hierarchy:
+//   REQUEST_TIMEOUT_MS (30s) — ACP handshake requests (initialize, session/new).
+//     These should complete in <1s; 30s is generous for slow cold-starts.
+//   PROMPT_TIMEOUT_MS (5min) — Model inference via session/prompt.
+//     Covers the full generation cycle. Mirrors the first-event timeout in
+//     provider.ts (getFirstEventTimeoutMs) which fires on the consumer side.
+//   SIGKILL fallback (5s) — Grace period after SIGTERM before escalating.
+//
+// 1 MiB — generous limit for ACP JSON-RPC lines; real messages are typically <10 KiB.
+// Prevents unbounded memory growth if the child process writes binary garbage.
 
 const REQUEST_TIMEOUT_MS = 30000;
 const PROMPT_TIMEOUT_MS = 300_000; // 5 minutes for model inference
@@ -129,6 +165,7 @@ export async function* bridgeHermesSession(
   let pendingRequestId: number | undefined;
   let requestResolve: ((msg: JsonRpcMessage) => void) | undefined;
   let requestReject: ((err: Error) => void) | undefined;
+  let stdinErrorHandler: ((err: Error) => void) | undefined;
   const activeTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   if (!childProcess.stdout) {
@@ -230,7 +267,7 @@ export async function* bridgeHermesSession(
             // Known unhandled: 'usage_update' (Draft-stage RFD, not stable protocol).
             // See acp-protocol.ts UsageUpdate for details.
             getLog().debug(
-              { sessionUpdate: (update as unknown as Record<string, unknown>).sessionUpdate },
+              { sessionUpdate: (update as { sessionUpdate?: string }).sessionUpdate },
               'acp.unrecognized_session_update'
             );
           }
@@ -259,6 +296,10 @@ export async function* bridgeHermesSession(
       requestResolve = undefined;
       pendingRequestId = undefined;
     }
+    if (stdinErrorHandler && childProcess.stdin) {
+      childProcess.stdin.removeListener('error', stdinErrorHandler);
+      stdinErrorHandler = undefined;
+    }
   }
 
   /** Emit a terminal result chunk exactly once, regardless of which handler fires first. */
@@ -266,6 +307,24 @@ export async function* bridgeHermesSession(
     if (terminalEmitted) return;
     terminalEmitted = true;
     queue.push({ kind: 'chunk', chunk });
+  }
+
+  /** Build error array from base message + last stderr line, classify the error. */
+  function buildTerminalError(
+    baseMessage: string,
+    stderrLines: string[],
+    context?: { exitCode?: number | null; jsonRpcCode?: number }
+  ): { errors: string[]; errorSubtype: string } {
+    const errors = [baseMessage];
+    if (stderrLines.length > 0) {
+      errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
+    }
+    const classified = classifyHermesError(baseMessage, {
+      stderr: stderrLines,
+      exitCode: context?.exitCode ?? null,
+      jsonRpcCode: context?.jsonRpcCode,
+    });
+    return { errors, errorSubtype: classified.errorClass };
   }
 
   // ── process exit handling ──────────────────────────────────────────────
@@ -276,19 +335,20 @@ export async function* bridgeHermesSession(
     if (code !== 0 && code !== null) {
       getLog().warn({ code, signal }, 'hermes.bridge.process_exited_nonzero');
       rejectPending(`Hermes ACP exited with code ${code}`);
-      const errors = [`Hermes ACP exited with code ${code}`];
-      if (stderrLines.length > 0) {
-        errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
-      }
-      emitTerminal({ type: 'result', isError: true, errors });
+      const { errors, errorSubtype } = buildTerminalError(
+        `Hermes ACP exited with code ${code}`,
+        stderrLines,
+        { exitCode: code }
+      );
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
     } else if (signal !== null) {
       getLog().warn({ signal }, 'hermes.bridge.process_terminated_by_signal');
       rejectPending(`Hermes ACP terminated by signal ${signal}`);
-      emitTerminal({
-        type: 'result',
-        isError: true,
-        errors: [`Hermes ACP terminated by signal ${signal}`],
-      });
+      const { errors, errorSubtype } = buildTerminalError(
+        `Hermes ACP terminated by signal ${signal}`,
+        stderrLines
+      );
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
     } else {
       // Clean exit (code 0 or null) — reject any pending request to avoid 30s timeout
       rejectPending('Hermes ACP process exited unexpectedly');
@@ -300,16 +360,10 @@ export async function* bridgeHermesSession(
   // ── process error handling (spawn failure, EPIPE, etc.) ────────────────
   childProcess.on('error', (error: Error) => {
     getLog().error({ err: error }, 'hermes.bridge.process_error');
-    let errorMsg = `Failed to run Hermes ACP: ${error.message}`;
-    if (stderrLines.length > 0) {
-      errorMsg += `\nstderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`;
-    }
-    rejectPending(errorMsg);
-    const errors = [`Failed to run Hermes ACP: ${error.message}`];
-    if (stderrLines.length > 0) {
-      errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
-    }
-    emitTerminal({ type: 'result', isError: true, errors });
+    const baseMessage = `Failed to run Hermes ACP: ${error.message}`;
+    const { errors, errorSubtype } = buildTerminalError(baseMessage, stderrLines);
+    rejectPending(baseMessage);
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
     queue.push({ kind: 'done' });
   });
 
@@ -346,16 +400,9 @@ export async function* bridgeHermesSession(
         // Process already killed or exited — expected, no-op
       }
     }, 5000);
-    let abortMsg = 'Query was aborted';
-    if (stderrLines.length > 0) {
-      abortMsg += `\nstderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`;
-    }
-    rejectPending(abortMsg);
-    const errors = ['Query was aborted'];
-    if (stderrLines.length > 0) {
-      errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
-    }
-    emitTerminal({ type: 'result', isError: true, errors });
+    const { errors, errorSubtype } = buildTerminalError('Query was aborted', stderrLines);
+    rejectPending('Query was aborted');
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
     queue.close();
   };
 

@@ -30,8 +30,6 @@ export interface HermesSessionContext {
  * Behavior:
  *   - cwd: validated to exist (falls back to process.cwd() when missing).
  *   - env: caller-provided vars are merged on top of process.env; caller wins.
- *   - resumeSessionId: logged as unsupported (Hermes has no session store),
- *     but does NOT throw — the caller can surface a warning chunk.
  *   - resumeSessionId: accepted but not used here. The provider-level session
  *     pool handles multi-turn reuse via skipInit mode.
  */
