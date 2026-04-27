@@ -29,9 +29,11 @@ mock.module('child_process', () => ({
   spawn: mockSpawn,
 }));
 
+const mockVerifyHermesBinary = mock(async () => true);
+
 mock.module('./binary-resolver', () => ({
   resolveHermesBinary: mock(async (path?: string) => path),
-  verifyHermesBinary: mock(async () => true),
+  verifyHermesBinary: mockVerifyHermesBinary,
   fileExists: () => true,
   INSTALL_INSTRUCTIONS: '',
 }));
@@ -278,6 +280,15 @@ describe('HermesProvider', () => {
       type: 'result',
       isError: true,
     });
+  });
+
+  test('throws when hermes binary is not executable', async () => {
+    mockVerifyHermesBinary.mockImplementationOnce(async () => false);
+
+    const { error } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
+
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('not executable');
   });
 
   test('spawn failure is handled gracefully', async () => {

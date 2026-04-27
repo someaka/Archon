@@ -808,6 +808,20 @@ describe('bridgeHermesSession', () => {
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
     expect(resultChunks).toHaveLength(1);
   });
+
+  // ── Input validation ────────────────────────────────────────────────────
+
+  test('throws for non-absolute cwd', async () => {
+    const mock = createAcpMock();
+
+    const { error } = await consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions({ cwd: 'relative/path' }))
+    );
+
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('absolute cwd');
+    expect(error!.message).toContain('relative/path');
+  });
 });
 
 describe('redactSecrets', () => {
