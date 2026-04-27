@@ -1,26 +1,23 @@
 /**
  * Session resolver for Hermes Agent.
  *
- * Hermes CLI is stateless per invocation — each `sendQuery()` spawns a fresh
- * process. This module prepares the execution context (cwd + env) for that
- * single invocation. No persistent session store, resume, or conversation
- * history is maintained.
+ * Prepares the execution context (cwd + env) for each sendQuery call.
+ * Session continuity is handled by the provider-level session pool
+ * (see session-pool.ts), not by this resolver.
  */
 
 import { statSync } from 'node:fs';
 
 /**
  * Execution context for a Hermes CLI invocation.
- * Hermes is stateless per invocation — there is no persistent session store,
- * session resume, or conversation history maintained across CLI calls. Each
- * `sendQuery()` spawns a fresh hermes process. This context captures the
- * working directory and merged environment for that single invocation.
+ * Captures the working directory and merged environment for a sendQuery call.
+ * Session persistence is handled upstream by the provider's session pool.
  */
 export interface HermesSessionContext {
   /** Working directory for the hermes CLI subprocess. */
   cwd: string;
-  /** Session ID — always undefined for Hermes since sessions are single-shot.
-   *  Present in the interface only for uniform provider shape. */
+  /** Session ID — not managed by this resolver (the provider pool tracks session IDs).
+   *  Present in the interface for uniform provider shape. */
   sessionId?: string;
   /** Merged environment variables for the hermes subprocess.
    *  Caller-provided env overrides process.env entries. */
@@ -35,11 +32,8 @@ export interface HermesSessionContext {
  *   - env: caller-provided vars are merged on top of process.env; caller wins.
  *   - resumeSessionId: logged as unsupported (Hermes has no session store),
  *     but does NOT throw — the caller can surface a warning chunk.
- *
- * Hermes ACP is stateless by design: each `hermes acp` invocation is
- * independent. There is no session persistence, resume, or threading model
- * on the Hermes side. Archon holds the conversation history; Hermes just
- * processes single-turn prompts.
+ *   - resumeSessionId: accepted but not used here. The provider-level session
+ *     pool handles multi-turn reuse via skipInit mode.
  */
 export function resolveHermesSession(options: {
   cwd: string;
@@ -77,8 +71,9 @@ export function resolveHermesSession(options: {
     }
   }
 
-  // Session resume is not supported — Hermes CLI is stateless per invocation.
-  // Caller surfaces a warning via capabilities.sessionResume === false.
+  // resumeSessionId is not used here — the provider session pool handles
+  // multi-turn reuse via skipInit mode. Parameter is kept for interface
+  // compatibility.
   void resumeSessionId;
 
   return { cwd, env };

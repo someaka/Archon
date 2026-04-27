@@ -23,22 +23,47 @@ import { HermesSessionPool } from './session-pool';
 const getLog = createLazyLogger('provider.hermes');
 
 /** Module-level session pool singleton — persists across sendQuery calls. */
-const sessionPool = new HermesSessionPool();
+const defaultSessionPool = new HermesSessionPool();
 
 // Clean up pool on process exit to prevent zombie child processes.
-process.on('exit', () => {
-  sessionPool.destroy();
-});
-process.on('SIGTERM', () => {
-  sessionPool.destroy();
-  process.exit(0);
-});
-process.on('SIGINT', () => {
-  sessionPool.destroy();
-  process.exit(0);
-});
+let signalHandlersRegistered = false;
+if (!signalHandlersRegistered) {
+  signalHandlersRegistered = true;
+  process.on('exit', () => {
+    defaultSessionPool.destroy();
+  });
+  process.on('SIGTERM', () => {
+    defaultSessionPool.destroy();
+    process.exit(0);
+  });
+  process.on('SIGINT', () => {
+    defaultSessionPool.destroy();
+    process.exit(0);
+  });
+}
 
 const MAX_TIMEOUT_MS = 300_000; // 5 minutes
+
+/** Symlink a file/dir if it exists. Silent no-op on missing source or link error. */
+function trySymlink(source: string, dest: string): void {
+  if (existsSync(source)) {
+    try {
+      symlinkSync(source, dest);
+    } catch {
+      /* source gone or dest exists */
+    }
+  }
+}
+
+/** Remove a temp directory silently. No-op if undefined or already gone. */
+function cleanupTempDir(dir?: string): void {
+  if (!dir) return;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+  } catch {
+    /* already gone */
+  }
+}
 
 export function getFirstEventTimeoutMs(): number {
   const raw = process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS;
@@ -84,6 +109,8 @@ export function getFirstEventTimeoutMs(): number {
  * supported.
  */
 export class HermesProvider implements IAgentProvider {
+  constructor(private pool: HermesSessionPool = defaultSessionPool) {}
+
   /**
    * Return the provider type identifier.
    */
@@ -140,7 +167,7 @@ export class HermesProvider implements IAgentProvider {
     const model = options?.model ?? config.model ?? 'default';
 
     // 3. Check session pool for an existing session.
-    const pooled = sessionPool.get(session.cwd, model);
+    const pooled = this.pool.get(session.cwd, model);
     if (pooled && !pooled.childProcess.killed && pooled.childProcess.exitCode === null) {
       getLog().debug(
         { cwd: session.cwd, model, sessionId: pooled.sessionId },
@@ -173,7 +200,7 @@ export class HermesProvider implements IAgentProvider {
         getLog().debug('hermes.pooled_query_completed');
       } catch (err) {
         // Pool session is likely dead — evict it so next call spawns fresh.
-        sessionPool.delete(session.cwd, model);
+        this.pool.delete(session.cwd, model);
         getLog().error({ err }, 'hermes.pooled_query_failed');
         throw err;
       } finally {
@@ -186,7 +213,7 @@ export class HermesProvider implements IAgentProvider {
 
     // Remove stale pool entry if process has exited.
     if (pooled) {
-      sessionPool.delete(session.cwd, model);
+      this.pool.delete(session.cwd, model);
     }
 
     // 4. No pooled session — full spawn path.
@@ -202,55 +229,23 @@ export class HermesProvider implements IAgentProvider {
     let tempHermesHome: string | undefined;
     if (options?.model) {
       tempHermesHome = mkdtempSync(join(tmpdir(), 'hermes-archon-'));
-      // Escape model string to prevent YAML injection
-      const escapedModel = options.model
-        .replace(/\\/g, '\\\\')
-        .replace(/"/g, '\\"')
-        .replace(/\n/g, '\\n')
-        .replace(/\r/g, '\\r');
-      writeFileSync(join(tempHermesHome, 'config.yaml'), `model: "${escapedModel}"\n`);
-      // Symlink .env for API keys
+      // Bun.YAML.stringify handles special chars safely — no manual escaping needed.
+      writeFileSync(
+        join(tempHermesHome, 'config.yaml'),
+        Bun.YAML.stringify({ model: options.model })
+      );
+      // Symlink config files from real HERMES_HOME into temp dir
       const realHermesHome = join(process.env.HOME || '/root', '.hermes');
-      const realEnv = join(realHermesHome, '.env');
-      if (existsSync(realEnv)) {
-        try {
-          symlinkSync(realEnv, join(tempHermesHome, '.env'));
-        } catch {
-          /* ignore */
-        }
-      }
-      // Symlink skills directory
-      const realSkills = join(realHermesHome, 'skills');
-      if (existsSync(realSkills)) {
-        try {
-          symlinkSync(realSkills, join(tempHermesHome, 'skills'));
-        } catch {
-          /* ignore */
-        }
-      }
-      // Symlink auth.json for OAuth credentials
-      const realAuth = join(realHermesHome, 'auth.json');
-      if (existsSync(realAuth)) {
-        try {
-          symlinkSync(realAuth, join(tempHermesHome, 'auth.json'));
-        } catch {
-          /* ignore */
-        }
-      }
+      trySymlink(join(realHermesHome, '.env'), join(tempHermesHome, '.env'));
+      trySymlink(join(realHermesHome, 'skills'), join(tempHermesHome, 'skills'));
+      trySymlink(join(realHermesHome, 'auth.json'), join(tempHermesHome, 'auth.json'));
       modelEnv.HERMES_HOME = tempHermesHome;
     }
 
     // 4c. Pre-flight check — verify the binary is executable and responds to --version.
     const isValid = await verifyHermesBinary(hermesBinary);
     if (!isValid) {
-      // Clean up temp dir before throwing.
-      if (tempHermesHome) {
-        try {
-          rmSync(tempHermesHome, { recursive: true, force: true });
-        } catch {
-          /* ignore */
-        }
-      }
+      cleanupTempDir(tempHermesHome);
       throw new Error(
         `Hermes binary '${hermesBinary}' is not executable or not working. ${INSTALL_INSTRUCTIONS}`
       );
@@ -324,7 +319,7 @@ export class HermesProvider implements IAgentProvider {
           { cwd: session.cwd, model, sessionId: capturedSessionId },
           'hermes.registering_pooled_session'
         );
-        sessionPool.set(session.cwd, model, {
+        this.pool.set(session.cwd, model, {
           childProcess: child,
           sessionId: capturedSessionId,
           cwd: session.cwd,
@@ -335,11 +330,7 @@ export class HermesProvider implements IAgentProvider {
         // Clean up tempHermesHome when the pooled process eventually exits.
         if (tempHermesHome) {
           child.on('exit', () => {
-            try {
-              rmSync(tempHermesHome, { recursive: true, force: true });
-            } catch {
-              /* ignore */
-            }
+            cleanupTempDir(tempHermesHome);
           });
         }
       } else {
@@ -349,13 +340,7 @@ export class HermesProvider implements IAgentProvider {
         } catch {
           /* already dead */
         }
-        if (tempHermesHome) {
-          try {
-            rmSync(tempHermesHome, { recursive: true, force: true });
-          } catch {
-            /* ignore */
-          }
-        }
+        cleanupTempDir(tempHermesHome);
       }
     }
   }

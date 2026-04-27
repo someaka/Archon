@@ -34,6 +34,7 @@ export class HermesSessionPool {
   }
 
   private makeKey(cwd: string, model: string): string {
+    // Null byte separator — safe because neither cwd nor model can contain null bytes
     return `${cwd}\0${model}`;
   }
 
@@ -48,7 +49,10 @@ export class HermesSessionPool {
 
   set(cwd: string, model: string, session: PooledSession): void {
     const key = this.makeKey(cwd, model);
-    // Unref the child process so it doesn't prevent Node from exiting
+    const existing = this.sessions.get(key);
+    if (existing) {
+      this.killSession(existing);
+    }
     session.childProcess.unref();
     this.sessions.set(key, session);
   }
@@ -66,7 +70,7 @@ export class HermesSessionPool {
     try {
       session.childProcess.kill('SIGKILL');
     } catch {
-      // Process may already be dead
+      // Process may already be dead (ESRCH) or we lack permissions (EPERM)
     }
   }
 
