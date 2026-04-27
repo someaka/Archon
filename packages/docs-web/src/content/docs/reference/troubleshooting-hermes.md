@@ -103,7 +103,7 @@ ollama pull qwen2.5-coder:32b
 
 **Symptom:** Workflow runs but no tool call information shown.
 
-**Fix:** Hermes sends ACP tool_call_update events. Ensure you're using Archon v0.x.x+ which supports these events. Check that the event-bridge is parsing them.
+**Fix:** Hermes sends ACP tool_call_update events. Ensure you're using Archon v0.3.9+ which supports these events. Check that the event-bridge is parsing them.
 
 ## OpenRouter rate limiting
 
@@ -122,3 +122,12 @@ ollama pull qwen2.5-coder:32b
 **Symptom:** Workflow times out waiting for response from large local models.
 
 **Fix:** Large models (70B+) on consumer hardware may take 2-5 minutes. The default timeout is 5 minutes. For slower hardware, contact support for timeout configuration.
+
+## First event timeout (no output within 60000ms)
+
+**Symptom:** Workflow times out with `Hermes subprocess produced no output within 60000ms`.
+
+**Fix:** Set `ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS` in your `.env` file (default: 60000ms, max: 300000ms). For slow models (70B+) or cold starts, increase to 120000–180000:
+  ```ini
+  ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS=180000
+  ```
