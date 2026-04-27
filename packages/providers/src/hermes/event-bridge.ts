@@ -34,7 +34,10 @@ function assertJsonRpcError(err: unknown): { code: number; message: string } {
   ) {
     return err as { code: number; message: string };
   }
-  return { code: -1, message: String(err ?? 'unknown error') };
+  return {
+    code: -1,
+    message: typeof err === 'string' ? err : (JSON.stringify(err) ?? 'unknown error'),
+  };
 }
 
 function assertObjectResult(result: unknown): Record<string, unknown> | undefined {
@@ -207,6 +210,10 @@ export async function* bridgeHermesSession(
         requestResolve = undefined;
         requestReject = undefined;
         pendingRequestId = undefined;
+        if (stdinErrorHandler && childProcess.stdin) {
+          childProcess.stdin.removeListener('error', stdinErrorHandler);
+          stdinErrorHandler = undefined;
+        }
         const timer = activeTimers.get(msg.id);
         if (timer) {
           clearTimeout(timer);
@@ -340,7 +347,7 @@ export async function* bridgeHermesSession(
         stderrLines,
         { exitCode: code }
       );
-      emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     } else if (signal !== null) {
       getLog().warn({ signal }, 'hermes.bridge.process_terminated_by_signal');
       rejectPending(`Hermes ACP terminated by signal ${signal}`);
@@ -348,7 +355,7 @@ export async function* bridgeHermesSession(
         `Hermes ACP terminated by signal ${signal}`,
         stderrLines
       );
-      emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     } else {
       // Clean exit (code 0 or null) — reject any pending request to avoid 30s timeout
       rejectPending('Hermes ACP process exited unexpectedly');
@@ -363,7 +370,7 @@ export async function* bridgeHermesSession(
     const baseMessage = `Failed to run Hermes ACP: ${error.message}`;
     const { errors, errorSubtype } = buildTerminalError(baseMessage, stderrLines);
     rejectPending(baseMessage);
-    emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     queue.push({ kind: 'done' });
   });
 
@@ -402,7 +409,7 @@ export async function* bridgeHermesSession(
     }, 5000);
     const { errors, errorSubtype } = buildTerminalError('Query was aborted', stderrLines);
     rejectPending('Query was aborted');
-    emitTerminal({ type: 'result', isError: true, errors, errorSubtype } as Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']);
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     queue.close();
   };
 
@@ -448,6 +455,10 @@ export async function* bridgeHermesSession(
           pendingRequestId = undefined;
           requestResolve = undefined;
           requestReject = undefined;
+          if (stdinErrorHandler && childProcess.stdin) {
+            childProcess.stdin.removeListener('error', stdinErrorHandler);
+            stdinErrorHandler = undefined;
+          }
           reject(new Error(`Hermes ACP request timed out after ${timeoutMs}ms`));
         }, timeoutMs);
         activeTimers.set(req.id, timer);
@@ -472,14 +483,14 @@ export async function* bridgeHermesSession(
       );
       const initResp = await sendRequest(initReq);
       if ('error' in initResp) {
-        const err = initResp.error as { code: number; message: string };
+        const err = assertJsonRpcError(initResp.error);
         throw new Error(`ACP initialize failed: ${err.message} (code ${err.code})`);
       }
       if (
         'result' in initResp &&
-        typeof (initResp.result as Record<string, unknown>).protocolVersion === 'number'
+        typeof assertObjectResult(initResp.result)?.protocolVersion === 'number'
       ) {
-        const protoVersion = (initResp.result as Record<string, unknown>).protocolVersion as number;
+        const protoVersion = assertObjectResult(initResp.result)?.protocolVersion as number;
         if (protoVersion !== 1) {
           throw new Error(
             `Hermes ACP protocol version ${protoVersion} is not supported. Only version 1 is supported.`
@@ -489,30 +500,31 @@ export async function* bridgeHermesSession(
 
       // Log agent capabilities, info, and auth methods from the initialize response
       if ('result' in initResp) {
-        const result = initResp.result as Record<string, unknown>;
+        const result = assertObjectResult(initResp.result);
+        if (result) {
+          if (result.agentCapabilities && typeof result.agentCapabilities === 'object') {
+            const caps = result.agentCapabilities as Record<string, unknown>;
+            getLog().debug(
+              {
+                loadSession: caps.loadSession,
+                promptCapabilities: caps.promptCapabilities,
+                mcpCapabilities: caps.mcpCapabilities,
+              },
+              'acp.initialize.agent_capabilities'
+            );
+          }
 
-        if (result.agentCapabilities && typeof result.agentCapabilities === 'object') {
-          const caps = result.agentCapabilities as Record<string, unknown>;
-          getLog().debug(
-            {
-              loadSession: caps.loadSession,
-              promptCapabilities: caps.promptCapabilities,
-              mcpCapabilities: caps.mcpCapabilities,
-            },
-            'acp.initialize.agent_capabilities'
-          );
-        }
+          if (result.agentInfo && typeof result.agentInfo === 'object') {
+            const info = result.agentInfo as Record<string, unknown>;
+            getLog().debug(
+              { name: info.name, title: info.title, version: info.version },
+              'acp.initialize.agent_info'
+            );
+          }
 
-        if (result.agentInfo && typeof result.agentInfo === 'object') {
-          const info = result.agentInfo as Record<string, unknown>;
-          getLog().debug(
-            { name: info.name, title: info.title, version: info.version },
-            'acp.initialize.agent_info'
-          );
-        }
-
-        if (Array.isArray(result.authMethods)) {
-          getLog().debug({ authMethods: result.authMethods }, 'acp.initialize.auth_methods');
+          if (Array.isArray(result.authMethods)) {
+            getLog().debug({ authMethods: result.authMethods }, 'acp.initialize.auth_methods');
+          }
         }
       }
 
@@ -527,12 +539,12 @@ export async function* bridgeHermesSession(
       );
       const sessionResp = await sendRequest(sessionReq);
       if ('error' in sessionResp) {
-        const err = sessionResp.error as { code: number; message: string };
+        const err = assertJsonRpcError(sessionResp.error);
         throw new Error(`ACP session/new failed: ${err.message} (code ${err.code})`);
       }
       if ('result' in sessionResp) {
-        const result = sessionResp.result as Record<string, unknown>;
-        if (typeof result.sessionId === 'string') {
+        const result = assertObjectResult(sessionResp.result);
+        if (result && typeof result.sessionId === 'string') {
           sessionId = result.sessionId;
         }
       }
@@ -565,12 +577,14 @@ export async function* bridgeHermesSession(
     );
     const promptResp = await sendRequest(promptReq, PROMPT_TIMEOUT_MS);
     if ('error' in promptResp) {
-      const err = promptResp.error as { code: number; message: string };
+      const err = assertJsonRpcError(promptResp.error);
       throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
     }
     // 4. Emit terminal result
     const result =
-      'result' in promptResp ? (promptResp.result as Record<string, unknown>) : undefined;
+      'result' in promptResp
+        ? assertObjectResult('result' in promptResp ? promptResp.result : undefined)
+        : undefined;
     const stopReason = result?.stopReason as string | undefined;
     const tokens = result?.usage
       ? normalizeAcpUsage(result.usage as Record<string, unknown>)
@@ -601,11 +615,9 @@ export async function* bridgeHermesSession(
     queue.push({ kind: 'done' });
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
-    emitTerminal({
-      type: 'result',
-      isError: true,
-      errors: [(err as Error).message],
-    });
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    const { errors, errorSubtype } = buildTerminalError(errorMessage, stderrLines);
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     queue.push({ kind: 'done' });
   }
 

@@ -236,6 +236,9 @@ export interface PromptResponseUsage {
   totalTokens?: number;
 }
 
+// TODO(#acp-usage-update): Add UsageUpdate to SessionUpdateUnion when the ACP spec
+// stabilizes the usage_update notification. Currently excluded because the Draft RFD
+// shape is unstable and events of this type hit the debug log in event-bridge.
 export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpdate | ToolCallUpdate;
 
 /** The params payload of a `session/update` notification. */
