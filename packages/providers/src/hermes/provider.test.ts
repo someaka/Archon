@@ -301,14 +301,11 @@ describe('HermesProvider', () => {
       type: 'result',
       isError: true,
     });
-    expect(
-      chunks.some(
-        c =>
-          (c as { type: string; isError?: boolean; errors?: string[] }).type === 'result' &&
-          (c as { isError?: boolean }).isError &&
-          (c as { errors?: string[] }).errors?.some(e => e.includes('spawn'))
-      )
-    ).toBe(true);
+    // Strict assertion: error array contains expected spawn failure text
+    const errResult = resultChunks[0];
+    expect(errResult.errors).toBeDefined();
+    expect(errResult.errors?.[0]).toContain('Failed to run Hermes ACP');
+    expect(errResult.errors?.[0]).toContain('spawn EACCES');
   });
 
   test('resume session is accepted without throwing', async () => {

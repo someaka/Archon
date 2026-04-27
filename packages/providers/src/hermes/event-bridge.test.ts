@@ -404,8 +404,11 @@ describe('bridgeHermesSession', () => {
     const lastResult = resultChunks[resultChunks.length - 1] as {
       type: string;
       isError?: boolean;
+      errors?: string[];
     };
     expect(lastResult.isError).toBe(true);
+    expect(lastResult.errors).toBeDefined();
+    expect(lastResult.errors?.[0]).toContain('Hermes ACP exited with code 1');
   });
 
   // ── Process crash (error event) ─────────────────────────────────────────
@@ -423,10 +426,18 @@ describe('bridgeHermesSession', () => {
 
     const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
     expect(resultChunks.length).toBeGreaterThan(0);
-    expect(resultChunks[0]).toMatchObject({
+    const firstResult = resultChunks[0] as {
+      type: string;
+      isError?: boolean;
+      errors?: string[];
+    };
+    expect(firstResult).toMatchObject({
       type: 'result',
       isError: true,
     });
+    expect(firstResult.errors).toBeDefined();
+    expect(firstResult.errors?.[0]).toContain('Failed to run Hermes ACP');
+    expect(firstResult.errors?.[0]).toContain('spawn failure');
   });
 
   // ── Abort signal ────────────────────────────────────────────────────────
@@ -506,11 +517,15 @@ describe('redactSecrets', () => {
     expect(redactSecrets('key=sk-abc123')).toBe('key=[REDACTED]');
   });
 
-  test('redacts api_key in JSON', () => {
-    expect(redactSecrets('{"api_key": "secret123"}')).toBe('{"api_key":"[REDACTED]"}');
+  test('redacts api_key=value pattern', () => {
+    expect(redactSecrets('api_key=secretvalue')).toBe('api_key=[REDACTED]');
   });
 
-  test('redacts OPENAI_API_KEY= pattern', () => {
+  test('redacts api_key in JSON', () => {
+    expect(redactSecrets('{"api_key":"sk-abc123"}')).toBe('{"api_key":"[REDACTED]"}');
+  });
+
+  test('redacts OPENAI_API_KEY=value', () => {
     expect(redactSecrets('OPENAI_API_KEY=sk-abc123')).toBe('OPENAI_API_KEY=[REDACTED]');
   });
 
@@ -521,7 +536,17 @@ describe('redactSecrets', () => {
   });
 
   test('redacts ANTHROPIC_API_KEY', () => {
-    expect(redactSecrets('ANTHROPIC_API_KEY=sk-ant-abc')).toBe('ANTHROPIC_API_KEY=[REDACTED]');
+    expect(redactSecrets('ANTHROPIC_API_KEY=sk-ant-xxx')).toBe('ANTHROPIC_API_KEY=[REDACTED]');
+  });
+
+  test('redacts AWS_SECRET_ACCESS_KEY', () => {
+    expect(redactSecrets('AWS_SECRET_ACCESS_KEY=abc123xyz')).toBe(
+      'AWS_SECRET_ACCESS_KEY=[REDACTED]'
+    );
+  });
+
+  test('redacts GITHUB_TOKEN', () => {
+    expect(redactSecrets('GITHUB_TOKEN=ghp_xxxxx')).toBe('GITHUB_TOKEN=[REDACTED]');
   });
 
   test('preserves non-secret content', () => {
