@@ -221,6 +221,21 @@ export interface UsageUpdate {
   costUsd?: number;
 }
 
+/**
+ * ACP PromptResponse usage data (UNSTABLE — Draft RFD).
+ * Per-turn token counts returned in session/prompt result.
+ *
+ * @see https://agentclientprotocol.com/rfds/session-usage
+ */
+export interface PromptResponseUsage {
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedReadTokens?: number;
+  cachedWriteTokens?: number;
+  thoughtTokens?: number;
+  totalTokens?: number;
+}
+
 export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpdate | ToolCallUpdate;
 
 /** The params payload of a `session/update` notification. */
