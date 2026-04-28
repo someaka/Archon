@@ -281,6 +281,41 @@ nodes:
     depends_on: [fix-plan]
 
   # ═══════════════════════════════════════════════════════════════
+  # SETUP: Install dependencies (worktrees lack node_modules)
+  # ═══════════════════════════════════════════════════════════════
+
+  - id: setup
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(pwd)"
+      cd "$WORKDIR"
+
+      echo "=== Installing Dependencies ==="
+      if [ -f "bun.lock" ] || [ -f "bun.lockb" ]; then
+        echo "Found bun lockfile, running bun install..."
+        bun install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: bun install"
+      elif [ -f "package-lock.json" ]; then
+        echo "Found npm lockfile, running npm ci..."
+        npm ci 2>&1 | tail -5
+        echo "PASS: npm ci"
+      elif [ -f "yarn.lock" ]; then
+        echo "Found yarn lockfile..."
+        yarn install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: yarn install"
+      elif [ -f "pnpm-lock.yaml" ]; then
+        echo "Found pnpm lockfile..."
+        pnpm install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: pnpm install"
+      else
+        echo "WARN: No lockfile found — skipping dependency install"
+      fi
+    depends_on: [branch-setup]
+    timeout: 300000
+
+  # ═══════════════════════════════════════════════════════════════
   # PHASE 6: IMPLEMENT FIXES — Execute fix plan with guardrails
   # ═══════════════════════════════════════════════════════════════
 
@@ -316,7 +351,7 @@ nodes:
       - If a fix introduces a type error: fix the type error, do not suppress it
       - If a fix breaks a test: investigate whether the test was testing the buggy behavior (update test) or the fix is wrong (revert and reassess)
       - If you discover the plan missed a dependency: fix it and note it in the commit message
-    depends_on: [branch-setup]
+    depends_on: [setup]
     context: fresh
 
   # ═══════════════════════════════════════════════════════════════
@@ -356,7 +391,7 @@ nodes:
       else
         echo "VALIDATION_STATUS: FAIL"
       fi
-    depends_on: [implement-fixes]
+    depends_on: [implement-fixes, setup]
     timeout: 300000
 
   # ═══════════════════════════════════════════════════════════════

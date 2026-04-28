@@ -53,6 +53,41 @@ nodes:
       fi
 
   # ═══════════════════════════════════════════════════════════════════
+  # SETUP: Install dependencies (worktrees lack node_modules)
+  # ═══════════════════════════════════════════════════════════════════
+
+  - id: setup
+    bash: |
+      #!/bin/bash
+      set -e
+
+      WORKDIR="$(cat "$ARTIFACTS_DIR/.workdir")"
+      cd "$WORKDIR"
+
+      echo "=== Installing Dependencies ==="
+      if [ -f "bun.lock" ] || [ -f "bun.lockb" ]; then
+        echo "Found bun lockfile, running bun install..."
+        bun install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: bun install"
+      elif [ -f "package-lock.json" ]; then
+        echo "Found npm lockfile, running npm ci..."
+        npm ci 2>&1 | tail -5
+        echo "PASS: npm ci"
+      elif [ -f "yarn.lock" ]; then
+        echo "Found yarn lockfile..."
+        yarn install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: yarn install"
+      elif [ -f "pnpm-lock.yaml" ]; then
+        echo "Found pnpm lockfile..."
+        pnpm install --frozen-lockfile 2>&1 | tail -5
+        echo "PASS: pnpm install"
+      else
+        echo "WARN: No lockfile found — skipping dependency install"
+      fi
+    depends_on: [parse-audit]
+    timeout: 300000
+
+  # ═══════════════════════════════════════════════════════════════════
   # PHASE 2: FIX DESIGN (adversarial — designer + critic)
   # ═══════════════════════════════════════════════════════════════════
 
@@ -156,7 +191,7 @@ nodes:
          ```
 
       Be surgical. Change ONLY what's necessary. Do not refactor unrelated code.
-    depends_on: [fix-critic]
+    depends_on: [fix-critic, setup]
     context: fresh
 
   # ═══════════════════════════════════════════════════════════════════
@@ -179,7 +214,7 @@ nodes:
         echo "FAIL: type-check"
         exit 0
       fi
-    depends_on: [implement-fixes]
+    depends_on: [implement-fixes, setup]
     timeout: 120000
 
   - id: lint-check
@@ -194,7 +229,7 @@ nodes:
       NODE_OPTIONS="--max-old-space-size=4096" bun run lint --max-warnings 0 2>&1 || true
       echo "DONE: lint"
       exit 0
-    depends_on: [implement-fixes]
+    depends_on: [implement-fixes, setup]
     timeout: 120000
 
   - id: test-gates
@@ -213,7 +248,7 @@ nodes:
       bun run test 2>&1 || true
       echo "DONE: tests"
       exit 0
-    depends_on: [implement-fixes]
+    depends_on: [implement-fixes, setup]
     timeout: 300000
 
   # ═══════════════════════════════════════════════════════════════════
