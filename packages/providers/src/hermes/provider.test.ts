@@ -51,6 +51,7 @@ mock.module('./hermes-mcp-reader', () => ({
 import { HermesProvider, getFirstEventTimeoutMs } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
 import { HermesSessionPool } from './session-pool';
+import { classifyHermesError } from './error-classifier';
 import type { ChildProcess } from 'child_process';
 
 // ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────
@@ -201,6 +202,22 @@ describe('HermesProvider', () => {
     mockLogger.debug.mockClear();
     mockLogger.info.mockClear();
     mockLogger.child.mockClear();
+  });
+
+  // Capture original env values before any test modifies them
+  const originalEnv = {
+    ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS: process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS,
+    TEST_OVERRIDE: process.env.TEST_OVERRIDE,
+  };
+
+  afterEach(() => {
+    for (const [key, value] of Object.entries(originalEnv)) {
+      if (value === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = value;
+      }
+    }
   });
 
   test('getType returns "hermes"', () => {
@@ -460,6 +477,247 @@ describe('HermesProvider', () => {
     pool.destroy();
   });
 
+  test('skipInit resume passes correct sessionId and cwd to session/prompt', async () => {
+    const mockAcp = createAcpMock();
+    const capturedPromptRequests: Array<Record<string, unknown>> = [];
+
+    // Intercept stdin to capture session/prompt request bodies
+    const originalWrite = (mockAcp.stdin as any)._write.bind(mockAcp.stdin);
+    (mockAcp.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          capturedPromptRequests.push(req.params);
+        }
+      } catch {
+        // not JSON — ignore
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    mockSpawn.mockImplementation(() => mockAcp.process);
+    (mockAcp.process as any).exitCode = null;
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+    const testCwd = '/tmp';
+
+    // First call — full ACP handshake (initialize + session/new + session/prompt)
+    const { chunks: chunks1, error: error1 } = await consume(
+      provider.sendQuery('Hello', testCwd, undefined, { model: 'test-model' })
+    );
+    expect(error1).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Extract sessionId from the first result chunk
+    const result1 = chunks1.filter(
+      (c): c is { type: 'result'; sessionId?: string } =>
+        (c as { type?: string })?.type === 'result'
+    );
+    expect(result1).toHaveLength(1);
+    const firstSessionId = result1[0].sessionId;
+    expect(firstSessionId).toBeDefined();
+
+    // Verify pool stores the session with correct cwd
+    const pooled = pool.get(testCwd, 'test-model');
+    expect(pooled).toBeDefined();
+    expect(pooled!.sessionId).toBe(firstSessionId);
+    expect(pooled!.cwd).toBe(testCwd);
+
+    // Clear captured prompt requests before second call
+    capturedPromptRequests.length = 0;
+
+    // Second call — same cwd + model → triggers skipInit (pool reuse)
+    const { chunks: chunks2 } = await consume(
+      provider.sendQuery('Follow up', testCwd, undefined, { model: 'test-model' })
+    );
+    // Only ONE spawn total — second call reused pooled session
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Verify the prompt request from the second call uses the correct sessionId
+    expect(capturedPromptRequests).toHaveLength(1);
+    expect(capturedPromptRequests[0].sessionId).toBe(firstSessionId);
+
+    // Verify the second query succeeded
+    const result2 = chunks2.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result2).toHaveLength(1);
+
+    pool.destroy();
+  });
+
+  // ── Pool stale entry and eviction ──────────────────────────────────────
+
+  test('sendQuery evicts stale pooled session and spawns fresh', async () => {
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    // First spawn returns mockAcp1, second spawn returns mockAcp2
+    mockSpawn
+      .mockImplementationOnce(() => mockAcp1.process)
+      .mockImplementationOnce(() => mockAcp2.process);
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — full ACP handshake, registers in pool
+    (mockAcp1.process as any).exitCode = null;
+    const { chunks: chunks1 } = await consume(
+      provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' })
+    );
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(pool.size).toBe(1);
+
+    // Mark the pooled process as having exited (stale)
+    (mockAcp1.process as any).exitCode = 99;
+
+    // Second call — should detect stale, evict, and spawn fresh
+    (mockAcp2.process as any).exitCode = null;
+    const { chunks: chunks2 } = await consume(
+      provider.sendQuery('Follow up', '/tmp', undefined, { model: 'test-model' })
+    );
+
+    // New spawn happened
+    expect(mockSpawn).toHaveBeenCalledTimes(2);
+
+    // Pool should now have the fresh session (mockAcp2)
+    expect(pool.size).toBe(1);
+
+    // Both queries should have succeeded
+    const result1 = chunks1.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result1).toHaveLength(1);
+    const result2 = chunks2.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result2).toHaveLength(1);
+
+    pool.destroy();
+  });
+
+  test('sendQuery evicts pool entry on pooled query failure', async () => {
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    // First mock: works normally. Second mock: works normally for fresh spawn after eviction.
+    let callCount = 0;
+    mockSpawn.mockImplementation(() => {
+      callCount++;
+      return callCount === 1 ? mockAcp1.process : mockAcp2.process;
+    });
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — succeeds normally, registers in pool
+    (mockAcp1.process as any).exitCode = null;
+    const { chunks: chunks1, error: error1 } = await consume(
+      provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' })
+    );
+    expect(error1).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(pool.size).toBe(1);
+
+    // Override the pooled process stdin to swallow session/prompt (no response).
+    // This causes the bridge to produce no output, triggering the first-event timeout.
+    const originalWrite = (mockAcp1.stdin as any)._write.bind(mockAcp1.stdin);
+    (mockAcp1.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          // Don't respond — let the first-event timeout fire
+          callback();
+          return;
+        }
+      } catch {
+        // not JSON — ignore
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    // Set a very short first-event timeout so the test doesn't wait 60s
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '50';
+
+    // Second call — reuses pooled session but bridge produces no output → timeout → eviction
+    (mockAcp2.process as any).exitCode = null;
+    const { chunks: chunks2, error: error2 } = await consume(
+      provider.sendQuery('Follow up', '/tmp', undefined, { model: 'test-model' })
+    );
+
+    // The pooled query should have thrown (first-event timeout)
+    expect(error2).toBeDefined();
+    expect(error2!.message).toContain('no output');
+
+    // Pool entry should have been evicted
+    expect(pool.size).toBe(0);
+
+    // A third call should spawn fresh
+    const { chunks: chunks3, error: error3 } = await consume(
+      provider.sendQuery('Another', '/tmp', undefined, { model: 'test-model' })
+    );
+    expect(error3).toBeUndefined();
+    expect(mockSpawn).toHaveBeenCalledTimes(2); // first call + third call (eviction forced fresh spawn)
+
+    const result3 = chunks3.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result3).toHaveLength(1);
+
+    pool.destroy();
+  });
+
+  test('two queries with same model but different providers use separate pool entries', async () => {
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    // Each spawn returns a different mock process
+    mockSpawn
+      .mockImplementationOnce(() => mockAcp1.process)
+      .mockImplementationOnce(() => mockAcp2.process);
+
+    (mockAcp1.process as any).exitCode = null;
+    (mockAcp2.process as any).exitCode = null;
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — model 'test-model' with provider 'providerA'
+    const { chunks: chunks1 } = await consume(
+      provider.sendQuery('Hello', '/tmp', undefined, {
+        model: 'test-model',
+        assistantConfig: { provider: 'providerA' },
+      })
+    );
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(pool.size).toBe(1);
+
+    const result1 = chunks1.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result1).toHaveLength(1);
+
+    // Second call — same model 'test-model' but different provider 'providerB'
+    // Should NOT reuse the pooled session; must spawn a fresh process.
+    const { chunks: chunks2 } = await consume(
+      provider.sendQuery('Hello again', '/tmp', undefined, {
+        model: 'test-model',
+        assistantConfig: { provider: 'providerB' },
+      })
+    );
+    expect(mockSpawn).toHaveBeenCalledTimes(2); // second spawn for different provider
+    expect(pool.size).toBe(2); // two distinct pool entries
+
+    const result2 = chunks2.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result2).toHaveLength(1);
+
+    pool.destroy();
+  });
+
   // ── Temp HERMES_HOME cleanup on failure ─────────────────────────────────
 
   test('cleans up temp HERMES_HOME when query fails', async () => {
@@ -707,6 +965,362 @@ describe('HermesProvider', () => {
       (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
     );
     expect(resultChunks).toHaveLength(1);
+  });
+
+  // ── globalAuth → HERMES_USE_GLOBAL_AUTH env var ─────────────────────────
+
+  test('sendQuery with globalAuth: true sets HERMES_USE_GLOBAL_AUTH in spawn env', async () => {
+    const mockAcp = createAcpMock();
+    let capturedEnv: Record<string, string> | undefined;
+
+    mockSpawn.mockImplementation((_cmd, _args, opts) => {
+      capturedEnv = (opts as Record<string, unknown>)?.env as Record<string, string> | undefined;
+      return mockAcp.process;
+    });
+
+    await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        assistantConfig: { globalAuth: true },
+      })
+    );
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(capturedEnv).toBeDefined();
+    expect(capturedEnv!.HERMES_USE_GLOBAL_AUTH).toBe('true');
+  });
+
+  test('sendQuery without globalAuth does not set HERMES_USE_GLOBAL_AUTH', async () => {
+    const mockAcp = createAcpMock();
+    let capturedEnv: Record<string, string> | undefined;
+
+    mockSpawn.mockImplementation((_cmd, _args, opts) => {
+      capturedEnv = (opts as Record<string, unknown>)?.env as Record<string, string> | undefined;
+      return mockAcp.process;
+    });
+
+    await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        assistantConfig: {},
+      })
+    );
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(capturedEnv).toBeDefined();
+    expect(capturedEnv!.HERMES_USE_GLOBAL_AUTH).toBeUndefined();
+  });
+
+  // ── env override priority tests ────────────────────────────────────────────
+
+  test('requestOptions.env passes through to spawned Hermes process', async () => {
+    const mockAcp = createAcpMock();
+    let capturedEnv: Record<string, string> | undefined;
+
+    mockSpawn.mockImplementation((_cmd, _args, opts) => {
+      capturedEnv = (opts as Record<string, unknown>)?.env as Record<string, string> | undefined;
+      return mockAcp.process;
+    });
+
+    await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        env: { TEST_VAR: 'hello' },
+      })
+    );
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(capturedEnv).toBeDefined();
+    expect(capturedEnv!.TEST_VAR).toBe('hello');
+  });
+
+  test('requestOptions.env overrides process.env values in spawn env', async () => {
+    process.env.TEST_OVERRIDE = 'original';
+
+    const mockAcp = createAcpMock();
+    let capturedEnv: Record<string, string> | undefined;
+
+    mockSpawn.mockImplementation((_cmd, _args, opts) => {
+      capturedEnv = (opts as Record<string, unknown>)?.env as Record<string, string> | undefined;
+      return mockAcp.process;
+    });
+
+    await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        env: { TEST_OVERRIDE: 'overridden' },
+      })
+    );
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(capturedEnv).toBeDefined();
+    expect(capturedEnv!.TEST_OVERRIDE).toBe('overridden');
+  });
+
+  test('codebase env vars pass through to Hermes process', async () => {
+    const mockAcp = createAcpMock();
+    let capturedEnv: Record<string, string> | undefined;
+
+    mockSpawn.mockImplementation((_cmd, _args, opts) => {
+      capturedEnv = (opts as Record<string, unknown>)?.env as Record<string, string> | undefined;
+      return mockAcp.process;
+    });
+
+    await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        env: { CODEBASE_KEY: 'value' },
+      })
+    );
+
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(capturedEnv).toBeDefined();
+    expect(capturedEnv!.CODEBASE_KEY).toBe('value');
+  });
+
+  // ── Resume failure scenarios ──────────────────────────────────────────────
+  // NOTE: 'resume with stale pool entry evicts and spawns fresh' is already
+  // covered by 'sendQuery evicts stale pooled session and spawns fresh' above.
+
+  test('resume failure on pooled session yields error result', async () => {
+    const mockAcp = createAcpMock();
+
+    // Track session/prompt calls — return JSON-RPC error on second prompt
+    let promptCount = 0;
+    const originalWrite = (mockAcp.stdin as any)._write.bind(mockAcp.stdin);
+    (mockAcp.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          promptCount++;
+          if (promptCount > 1) {
+            // Return JSON-RPC error on second prompt (simulating resume failure)
+            mockAcp.stdout.push(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: req.id,
+                error: { code: -1, message: 'mock prompt failure' },
+              }) + '\n'
+            );
+            callback();
+            return;
+          }
+        }
+      } catch {
+        // not JSON — ignore
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    mockSpawn.mockImplementation(() => mockAcp.process);
+    (mockAcp.process as any).exitCode = null;
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — succeeds, registers in pool
+    const { error: error1 } = await consume(
+      provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' })
+    );
+    expect(error1).toBeUndefined();
+    expect(promptCount).toBe(1);
+    expect(pool.size).toBe(1);
+
+    // Second call — reuses pooled session, mock returns error
+    const { chunks: chunks2 } = await consume(
+      provider.sendQuery('Follow up', '/tmp', undefined, {
+        model: 'test-model',
+      })
+    );
+    expect(promptCount).toBe(2);
+
+    // Error result chunk emitted with isError: true
+    const resultChunks = chunks2.filter(
+      (c): c is { type: 'result'; isError?: boolean; errors?: string[] } =>
+        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
+    );
+    expect(resultChunks.length).toBeGreaterThan(0);
+    expect(resultChunks[0]).toMatchObject({ type: 'result', isError: true });
+    expect(resultChunks[0].errors).toBeDefined();
+    expect(resultChunks[0].errors?.[0]).toContain('prompt failure');
+
+    // Pool entry persists — the bridge handles the error internally (emits
+    // terminal error result via emitTerminal + done). No exception propagates
+    // to the provider's catch block, so the pool entry is NOT evicted. The
+    // pooled process remains alive (keepAlive: true). The stale entry will be
+    // detected and evicted on the NEXT query if the process has exited.
+    expect(pool.size).toBe(1);
+
+    pool.destroy();
+  });
+
+  test('session/prompt timeout yields error result', async () => {
+    const mockAcp = createAcpMock();
+
+    // Override stdin to NOT respond to session/prompt (hang)
+    const originalWrite = (mockAcp.stdin as any)._write.bind(mockAcp.stdin);
+    (mockAcp.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          // Don't respond — let the first-event timeout fire
+          callback();
+          return;
+        }
+      } catch {
+        // not JSON — ignore
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    mockSpawn.mockImplementation(() => mockAcp.process);
+
+    // Set a very short first-event timeout
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '50';
+
+    const { error } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
+
+    // Error should contain 'no output'
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('no output');
+  });
+
+  test('preserves first-event timeout error at provider level (not generic abort)', async () => {
+    // Create a mock that hangs on session/prompt (no response)
+    const mockAcp = createAcpMock();
+    const originalWrite = (mockAcp.stdin as any)._write.bind(mockAcp.stdin);
+    (mockAcp.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          // Don't respond — let the first-event timeout fire
+          callback();
+          return;
+        }
+      } catch {
+        // not JSON — ignore
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    mockSpawn.mockImplementation(() => mockAcp.process);
+
+    // Set a very short first-event timeout so the test doesn't wait 60s
+    process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '50';
+
+    const { error } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
+
+    // Verify: error message contains 'no output' (not 'Query aborted' or generic message)
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('no output');
+    expect(error!.message).not.toContain('Query aborted');
+    expect(error!.message).not.toContain('generic abort');
+
+    // Verify: error is the timeout error, not wrapped/overwritten
+    // The timeout-utils produces: "Hermes subprocess produced no output within <N>ms"
+    expect(error!.message).toMatch(/Hermes subprocess produced no output within \d+ms/);
+  });
+});
+
+// ─── Retry behavior / error classification ─────────────────────────────────
+
+describe('retry behavior', () => {
+  test('classifies crash errors with shouldRetry: true (supports retry semantics)', () => {
+    // Non-zero exit code → crash classification → retryable
+    const crash = classifyHermesError('process exited', [], 1);
+    expect(crash.errorClass).toBe('crash');
+    expect(crash.shouldRetry).toBe(true);
+
+    // Panic text → crash classification → retryable
+    const panic = classifyHermesError('runtime panic: nil pointer', [], 0);
+    expect(panic.errorClass).toBe('crash');
+    expect(panic.shouldRetry).toBe(true);
+
+    // Non-zero exit 137 (OOM / SIGKILL) → crash → retryable
+    const oom = classifyHermesError('killed', [], 137);
+    expect(oom.errorClass).toBe('crash');
+    expect(oom.shouldRetry).toBe(true);
+  });
+
+  test('classifies auth errors as fatal (shouldRetry: false)', () => {
+    const unauthorized = classifyHermesError('Unauthorized', [], 0);
+    expect(unauthorized.errorClass).toBe('auth');
+    expect(unauthorized.shouldRetry).toBe(false);
+
+    const invalidKey = classifyHermesError('Invalid API key provided', [], 0);
+    expect(invalidKey.errorClass).toBe('auth');
+    expect(invalidKey.shouldRetry).toBe(false);
+  });
+
+  test('classifies rate_limit as retryable and unknown as retryable', () => {
+    // Rate limit → shouldRetry true
+    const rateLimit = classifyHermesError('429 Too Many Requests', [], 0);
+    expect(rateLimit.errorClass).toBe('rate_limit');
+    expect(rateLimit.shouldRetry).toBe(true);
+
+    // Timeout → classified as rate_limit, shouldRetry true
+    const timeout = classifyHermesError('request timed out', [], 0);
+    expect(timeout.errorClass).toBe('rate_limit');
+    expect(timeout.shouldRetry).toBe(true);
+
+    // Unknown errors → shouldRetry true (Hermes retries unknown errors)
+    const unknown = classifyHermesError('something unexpected', [], 0);
+    expect(unknown.errorClass).toBe('unknown');
+    expect(unknown.shouldRetry).toBe(true);
+  });
+
+  test('enriched error includes errorSubtype on process crash', async () => {
+    mockSpawn.mockImplementationOnce(() => {
+      const mockAcp = createAcpMock();
+      // Emit non-zero exit to trigger crash classification
+      queueMicrotask(() => {
+        mockAcp.emitExit(1);
+      });
+      return mockAcp.process;
+    });
+
+    const { chunks } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
+
+    const resultChunks = chunks.filter(
+      (c): c is { type: 'result'; isError?: boolean; errorSubtype?: string; errors?: string[] } =>
+        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
+    );
+    expect(resultChunks.length).toBeGreaterThan(0);
+    expect(resultChunks[0]).toMatchObject({
+      type: 'result',
+      isError: true,
+      errorSubtype: 'crash',
+    });
+    // errors array should contain the exit code message
+    expect(resultChunks[0].errors).toBeDefined();
+    expect(resultChunks[0].errors!.length).toBeGreaterThanOrEqual(1);
+    expect(resultChunks[0].errors![0]).toContain('exited with code 1');
+  });
+
+  test('abort signal during query emits terminal error result with errorSubtype', async () => {
+    const controller = new AbortController();
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
+
+    const gen = new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+      abortSignal: controller.signal,
+    });
+
+    // Abort mid-query
+    controller.abort();
+
+    const { chunks } = await consume(gen);
+
+    const resultChunks = chunks.filter(
+      (c): c is { type: 'result'; isError?: boolean; errorSubtype?: string } =>
+        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
+    );
+    expect(resultChunks.length).toBeGreaterThan(0);
+    expect(resultChunks[0]).toMatchObject({
+      type: 'result',
+      isError: true,
+    });
+    // errorSubtype should be defined (classified from 'Query was aborted')
+    expect(resultChunks[0].errorSubtype).toBeDefined();
+    expect(typeof resultChunks[0].errorSubtype).toBe('string');
   });
 });
 

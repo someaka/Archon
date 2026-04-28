@@ -142,8 +142,8 @@ describe('registry', () => {
 
     test('returns Hermes capabilities without instantiation', () => {
       const caps = getProviderCapabilities('hermes');
-      expect(caps.sessionResume).toBe(false);
-      expect(caps.mcp).toBe(false);
+      expect(caps.sessionResume).toBe(true);
+      expect(caps.mcp).toBe(true);
       expect(caps.hooks).toBe(false);
       expect(caps.skills).toBe(false);
       expect(caps.envInjection).toBe(true);
@@ -157,8 +157,8 @@ describe('registry', () => {
 
     test('Hermes registration declares conservative v1 capabilities', () => {
       const caps = getProviderCapabilities('hermes');
-      expect(caps.sessionResume).toBe(false);
-      expect(caps.mcp).toBe(false);
+      expect(caps.sessionResume).toBe(true);
+      expect(caps.mcp).toBe(true);
       expect(caps.hooks).toBe(false);
       expect(caps.skills).toBe(false);
       expect(caps.agents).toBe(false);

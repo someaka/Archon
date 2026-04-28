@@ -166,8 +166,8 @@ export class HermesProvider implements IAgentProvider {
     // Determine model key for pool lookup.
     const model = options?.model ?? config.model ?? 'default';
 
-    // 3. Check session pool for an existing session.
-    const pooled = this.pool.get(session.cwd, model);
+    // 3. Check session pool for an existing session (keyed by cwd + provider + model).
+    const pooled = this.pool.get(session.cwd, model, config.provider);
     if (pooled && !pooled.childProcess.killed && pooled.childProcess.exitCode === null) {
       getLog().debug(
         { cwd: session.cwd, model, sessionId: pooled.sessionId },
@@ -200,7 +200,7 @@ export class HermesProvider implements IAgentProvider {
         getLog().debug('hermes.pooled_query_completed');
       } catch (err) {
         // Pool session is likely dead — evict it so next call spawns fresh.
-        this.pool.delete(session.cwd, model);
+        this.pool.delete(session.cwd, model, config.provider);
         getLog().error({ err }, 'hermes.pooled_query_failed');
         throw err;
       } finally {
@@ -213,7 +213,7 @@ export class HermesProvider implements IAgentProvider {
 
     // Remove stale pool entry if process has exited.
     if (pooled) {
-      this.pool.delete(session.cwd, model);
+      this.pool.delete(session.cwd, model, config.provider);
     }
 
     // 4. No pooled session — full spawn path.
@@ -226,13 +226,29 @@ export class HermesProvider implements IAgentProvider {
     // per-node model selection — HERMES_MODEL env var does NOT work in ACP mode,
     // and session/new does not accept a model param (ACP spec).
     const modelEnv: Record<string, string> = {};
+    // Archon convention: HERMES_USE_GLOBAL_AUTH signals the Hermes ACP subprocess
+    // to use globally configured auth (from `hermes login`) instead of per-session
+    // credentials. Not an official Hermes env var — Archon-specific for Docker/CI.
+    if (config.globalAuth) {
+      modelEnv.HERMES_USE_GLOBAL_AUTH = 'true';
+    }
     let tempHermesHome: string | undefined;
-    if (options?.model) {
+    if (options?.model || config.provider || config.endpoint) {
       tempHermesHome = mkdtempSync(join(tmpdir(), 'hermes-archon-'));
+      // Build structured config when provider/endpoint are specified;
+      // otherwise write a simple model string for backward compatibility.
+      const hasStructured = config.provider || config.endpoint;
+      const modelConfig: Record<string, unknown> = {
+        default: options?.model ?? config.model ?? 'default',
+      };
+      if (config.provider) modelConfig.provider = config.provider;
+      if (config.endpoint) modelConfig.base_url = config.endpoint;
       // Bun.YAML.stringify handles special chars safely — no manual escaping needed.
       writeFileSync(
         join(tempHermesHome, 'config.yaml'),
-        Bun.YAML.stringify({ model: options.model })
+        Bun.YAML.stringify({
+          model: hasStructured ? modelConfig : (options?.model ?? config.model ?? 'default'),
+        })
       );
       // Symlink config files from real HERMES_HOME into temp dir
       const realHermesHome = join(process.env.HOME || '/root', '.hermes');
@@ -319,14 +335,19 @@ export class HermesProvider implements IAgentProvider {
           { cwd: session.cwd, model, sessionId: capturedSessionId },
           'hermes.registering_pooled_session'
         );
-        this.pool.set(session.cwd, model, {
-          childProcess: child,
-          sessionId: capturedSessionId,
-          cwd: session.cwd,
+        this.pool.set(
+          session.cwd,
           model,
-          createdAt: Date.now(),
-          lastUsed: Date.now(),
-        });
+          {
+            childProcess: child,
+            sessionId: capturedSessionId,
+            cwd: session.cwd,
+            model,
+            createdAt: Date.now(),
+            lastUsed: Date.now(),
+          },
+          config.provider
+        );
         // Clean up tempHermesHome when the pooled process eventually exits.
         if (tempHermesHome) {
           child.on('exit', () => {

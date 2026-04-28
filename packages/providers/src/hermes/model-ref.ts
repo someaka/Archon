@@ -76,6 +76,10 @@ export function parseHermesModelRef(
  * The model string is passed through to `resolveHermesModel`, which falls
  * back to the configured HERMES_MODEL env var when the modelRef doesn't
  * match the "hermes:" prefix format.
+ *
+ * This makes Hermes the fallback provider in `inferProviderFromModel()` for
+ * any model not matching Claude or Codex patterns. Users can always set
+ * `provider:` explicitly to override inference.
  */
 export function isHermesModelCompatible(_model: string): boolean {
   return true;

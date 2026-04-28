@@ -172,4 +172,60 @@ describe('HermesSessionPool', () => {
     pool.delete('/dir1', 'm1');
     expect(pool.size).toBe(1);
   });
+
+  test('provider parameter isolates sessions with same cwd and model', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const cp1 = mockChildProcess();
+    const cp2 = mockChildProcess();
+    const session1 = makeSession({ childProcess: cp1, sessionId: 'session-openai' });
+    const session2 = makeSession({ childProcess: cp2, sessionId: 'session-anthropic' });
+
+    pool.set('/tmp', 'gpt-4', session1, 'openai');
+    pool.set('/tmp', 'gpt-4', session2, 'anthropic');
+
+    expect(pool.size).toBe(2);
+
+    const got1 = pool.get('/tmp', 'gpt-4', 'openai');
+    const got2 = pool.get('/tmp', 'gpt-4', 'anthropic');
+
+    expect(got1).toBe(session1);
+    expect(got1!.sessionId).toBe('session-openai');
+    expect(got2).toBe(session2);
+    expect(got2!.sessionId).toBe('session-anthropic');
+  });
+
+  test('get with provider does not return session set without provider', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    expect(pool.get('/tmp', 'model')).toBe(session);
+    expect(pool.get('/tmp', 'model', 'hermes')).toBeUndefined();
+  });
+
+  test("delete with provider only removes that provider's session", () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const cp1 = mockChildProcess();
+    const cp2 = mockChildProcess();
+    pool.set('/tmp', 'model', makeSession({ childProcess: cp1 }), 'openai');
+    pool.set('/tmp', 'model', makeSession({ childProcess: cp2 }), 'anthropic');
+
+    pool.delete('/tmp', 'model', 'openai');
+
+    expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(cp2.kill).not.toHaveBeenCalled();
+    expect(pool.size).toBe(1);
+    expect(pool.get('/tmp', 'model', 'anthropic')).toBeDefined();
+    expect(pool.get('/tmp', 'model', 'openai')).toBeUndefined();
+  });
+
+  test('undefined provider and empty-string provider produce same key', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    expect(pool.get('/tmp', 'model')).toBe(session);
+    expect(pool.get('/tmp', 'model', undefined)).toBe(session);
+    expect(pool.get('/tmp', 'model', '')).toBe(session);
+  });
 });

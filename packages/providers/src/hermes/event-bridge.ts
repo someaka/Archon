@@ -586,6 +586,7 @@ export async function* bridgeHermesSession(
         ? assertObjectResult('result' in promptResp ? promptResp.result : undefined)
         : undefined;
     const stopReason = result?.stopReason as string | undefined;
+    const responseIsError = result?.isError === true;
     const tokens = result?.usage
       ? normalizeAcpUsage(result.usage as Record<string, unknown>)
       : undefined;
@@ -593,6 +594,7 @@ export async function* bridgeHermesSession(
       type: 'result',
       sessionId,
       stopReason,
+      ...(responseIsError ? { isError: true } : {}),
       ...(tokens ? { tokens } : {}),
     });
     // Send session/close notification (fire-and-forget) per ACP spec.

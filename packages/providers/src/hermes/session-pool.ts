@@ -33,13 +33,13 @@ export class HermesSessionPool {
     this.cleanupTimer.unref();
   }
 
-  private makeKey(cwd: string, model: string): string {
-    // Null byte separator — safe because neither cwd nor model can contain null bytes
-    return `${cwd}\0${model}`;
+  private makeKey(cwd: string, model: string, provider?: string): string {
+    // Null byte separator — safe because cwd, model, and provider cannot contain null bytes
+    return `${cwd}\0${provider ?? ''}\0${model}`;
   }
 
-  get(cwd: string, model: string): PooledSession | undefined {
-    const key = this.makeKey(cwd, model);
+  get(cwd: string, model: string, provider?: string): PooledSession | undefined {
+    const key = this.makeKey(cwd, model, provider);
     const session = this.sessions.get(key);
     if (session) {
       session.lastUsed = Date.now();
@@ -47,8 +47,8 @@ export class HermesSessionPool {
     return session;
   }
 
-  set(cwd: string, model: string, session: PooledSession): void {
-    const key = this.makeKey(cwd, model);
+  set(cwd: string, model: string, session: PooledSession, provider?: string): void {
+    const key = this.makeKey(cwd, model, provider);
     const existing = this.sessions.get(key);
     if (existing) {
       this.killSession(existing);
@@ -57,8 +57,8 @@ export class HermesSessionPool {
     this.sessions.set(key, session);
   }
 
-  delete(cwd: string, model: string): void {
-    const key = this.makeKey(cwd, model);
+  delete(cwd: string, model: string, provider?: string): void {
+    const key = this.makeKey(cwd, model, provider);
     const session = this.sessions.get(key);
     if (session) {
       this.killSession(session);
