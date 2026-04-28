@@ -60,7 +60,7 @@ export function classifyHermesError(
   // JSON-RPC error code classification (takes precedence)
   if (jsonRpcCode !== undefined) {
     const code = jsonRpcCode;
-    if (code === -32700 || code === -32600 || code === -32602) {
+    if (code === -32700 || code === -32600 || code === -32601 || code === -32602) {
       return {
         errorClass: 'protocol',
         shouldRetry: false,
@@ -87,7 +87,7 @@ export function classifyHermesError(
   // "no output within Nms" means the subprocess never produced output — retrying won't help
   if (combined.includes('no output within')) {
     return {
-      errorClass: 'rate_limit',
+      errorClass: 'crash',
       shouldRetry: false,
       enrichedMessage: `First-event timeout (subprocess hang): ${message}`,
     };

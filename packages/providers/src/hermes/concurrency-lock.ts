@@ -1,7 +1,7 @@
 /**
  * Async semaphore that serializes concurrent operations.
  * Used to prevent multiple hermes acp processes from contending on state.db.
- * Default maxConcurrency=1 (fully serialized). Tunable via ARCHON_HERMES_MAX_CONCURRENCY env var.
+ * Default maxConcurrency=3. Tunable via ARCHON_HERMES_MAX_CONCURRENCY env var.
  */
 export class ConcurrencyLock {
   private currentCount = 0;
@@ -11,8 +11,11 @@ export class ConcurrencyLock {
   constructor(config?: { maxConcurrency?: number }) {
     const envVal = process.env.ARCHON_HERMES_MAX_CONCURRENCY;
     const parsed = envVal ? Number(envVal) : undefined;
+    const MAX_ALLOWED = 32;
     const envMax =
-      typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+      typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_ALLOWED
+        ? parsed
+        : undefined;
     this.maxConcurrency = config?.maxConcurrency ?? envMax ?? 3;
   }
 

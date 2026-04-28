@@ -74,6 +74,8 @@ mock.module('./hermes-mcp-reader', () => ({
 const _trackedLocks: Array<{ _forceReset(): void }> = [];
 
 mock.module('./concurrency-lock', () => {
+  // ⚠️ SYNC REMINDER: This mock mirrors production ConcurrencyLock from concurrency-lock.ts.
+  // If you change the production class, update this mock to stay in sync.
   class ConcurrencyLock {
     private currentCount = 0;
     private readonly maxConcurrency: number;
@@ -143,6 +145,7 @@ afterEach(() => {
   for (const lock of _trackedLocks) {
     lock._forceReset();
   }
+  _trackedLocks.length = 0;
 });
 
 // ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────

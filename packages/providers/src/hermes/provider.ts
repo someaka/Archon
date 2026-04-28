@@ -401,6 +401,9 @@ export class HermesProvider implements IAgentProvider {
 
       if (capturedSessionId && !queryFailed) {
         // Success — register in pool for reuse by subsequent queries.
+        // NOTE: This runs even for freshSession queries. That's intentional:
+        // a fresh session avoids stale context for THIS query, but once used
+        // it's clean and can be reused by the next non-fresh query.
         getLog().debug(
           { cwd: session.cwd, model, sessionId: capturedSessionId },
           'hermes.registering_pooled_session'

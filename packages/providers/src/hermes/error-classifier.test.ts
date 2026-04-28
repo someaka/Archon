@@ -33,13 +33,13 @@ describe('classifyHermesError', () => {
     expect(shouldRetry).toBe(true);
   });
 
-  test('classifies "no output within Nms" as rate_limit (first-event timeout)', () => {
+  test('classifies "no output within Nms" as crash (first-event timeout)', () => {
     const { errorClass, shouldRetry }: ClassifiedError = classifyHermesError(
       'Hermes subprocess produced no output within 30000ms (hermes-preflight)',
       [],
       0
     );
-    expect(errorClass).toBe('rate_limit');
+    expect(errorClass).toBe('crash');
     expect(shouldRetry).toBe(false);
   });
 
@@ -134,11 +134,9 @@ describe('classifyHermesError', () => {
   });
 
   test('classifies JSON-RPC method not found (-32601)', () => {
-    // -32601 is not explicitly handled by the classifier;
-    // it falls through to 'unknown' with shouldRetry true.
     const result = classifyHermesError('fail', { jsonRpcCode: -32601 });
-    expect(result.errorClass).toBe('unknown');
-    expect(result.shouldRetry).toBe(true);
+    expect(result.errorClass).toBe('protocol');
+    expect(result.shouldRetry).toBe(false);
   });
 
   test('classifies JSON-RPC invalid params (-32602)', () => {
@@ -154,7 +152,7 @@ describe('classifyHermesError', () => {
     expect(result.shouldRetry).toBe(false);
   });
 
-  test('classifies unknown JSON-RPC code as crash', () => {
+  test('classifies unrecognized JSON-RPC code as unknown', () => {
     // Unrecognized JSON-RPC codes fall through to 'unknown' with shouldRetry true.
     const result = classifyHermesError('fail', { jsonRpcCode: -99999 });
     expect(result.errorClass).toBe('unknown');
