@@ -65,6 +65,69 @@ mock.module('./hermes-mcp-reader', () => ({
   readHermesMcpConfig: mockReadHermesMcpConfig,
 }));
 
+// ─── ConcurrencyLock isolation ──────────────────────────────────────────────
+// When a test times out and abandons an async generator mid-stream, the
+// finally-block lock.release() in provider.sendQuery never runs, permanently
+// blocking all subsequent tests (maxConcurrency=3). We mock the module to
+// track all lock instances and force-reset them between tests.
+
+const _trackedLocks: Array<{ _forceReset(): void }> = [];
+
+mock.module('./concurrency-lock', () => {
+  class ConcurrencyLock {
+    private currentCount = 0;
+    private readonly maxConcurrency: number;
+    private readonly waitQueue: (() => void)[] = [];
+
+    constructor(config?: { maxConcurrency?: number }) {
+      const envVal = process.env.ARCHON_HERMES_MAX_CONCURRENCY;
+      const parsed = envVal ? Number(envVal) : undefined;
+      const envMax =
+        typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+      this.maxConcurrency = config?.maxConcurrency ?? envMax ?? 3;
+      _trackedLocks.push(this as unknown as { _forceReset(): void });
+    }
+
+    async acquire(): Promise<void> {
+      if (this.currentCount < this.maxConcurrency) {
+        this.currentCount++;
+        return;
+      }
+      return new Promise<void>(resolve => {
+        this.waitQueue.push(() => {
+          this.currentCount++;
+          resolve();
+        });
+      });
+    }
+
+    release(): void {
+      if (this.currentCount <= 0) return; // underflow guard
+      this.currentCount--;
+      const next = this.waitQueue.shift();
+      if (next) next();
+    }
+
+    get active(): number {
+      return this.currentCount;
+    }
+    get pending(): number {
+      return this.waitQueue.length;
+    }
+
+    _forceReset(): void {
+      // Resolve all pending waiters so their promises don't hang
+      while (this.waitQueue.length) {
+        const next = this.waitQueue.shift()!;
+        next();
+      }
+      this.currentCount = 0;
+    }
+  }
+
+  return { ConcurrencyLock };
+});
+
 // Import AFTER mocks are set — module resolution freezes the mocks.
 import { HermesProvider, getFirstEventTimeoutMs } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
@@ -72,6 +135,15 @@ import { HermesSessionPool } from './session-pool';
 import { classifyHermesError } from './error-classifier';
 import { ConcurrencyLock } from './concurrency-lock';
 import type { ChildProcess } from 'child_process';
+
+// ─── Force-reset all ConcurrencyLock instances between tests ─────────────
+// Prevents a stuck lock from one test (e.g., timeout-abandoned generator)
+// from blocking all subsequent tests.
+afterEach(() => {
+  for (const lock of _trackedLocks) {
+    lock._forceReset();
+  }
+});
 
 // ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────
 

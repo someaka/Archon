@@ -33,6 +33,16 @@ describe('classifyHermesError', () => {
     expect(shouldRetry).toBe(true);
   });
 
+  test('classifies "no output within Nms" as rate_limit (first-event timeout)', () => {
+    const { errorClass, shouldRetry }: ClassifiedError = classifyHermesError(
+      'Hermes subprocess produced no output within 30000ms (hermes-preflight)',
+      [],
+      0
+    );
+    expect(errorClass).toBe('rate_limit');
+    expect(shouldRetry).toBe(false);
+  });
+
   test('classifies auth failure', () => {
     const { errorClass, shouldRetry }: ClassifiedError = classifyHermesError('Unauthorized', [], 0);
     expect(errorClass).toBe('auth');

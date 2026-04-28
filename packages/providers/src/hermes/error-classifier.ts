@@ -83,6 +83,16 @@ export function classifyHermesError(
     }
   }
 
+  // First-event timeout (subprocess hang) → NOT retryable
+  // "no output within Nms" means the subprocess never produced output — retrying won't help
+  if (combined.includes('no output within')) {
+    return {
+      errorClass: 'rate_limit',
+      shouldRetry: false,
+      enrichedMessage: `First-event timeout (subprocess hang): ${message}`,
+    };
+  }
+
   // Rate limit / timeout → retryable
   if (
     combined.includes('rate limit') ||

@@ -13,7 +13,7 @@ export class ConcurrencyLock {
     const parsed = envVal ? Number(envVal) : undefined;
     const envMax =
       typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
-    this.maxConcurrency = config?.maxConcurrency ?? envMax ?? 1;
+    this.maxConcurrency = config?.maxConcurrency ?? envMax ?? 3;
   }
 
   async acquire(): Promise<void> {
