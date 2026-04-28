@@ -559,62 +559,79 @@ export async function* bridgeHermesSession(
       sessionId = options.existingSessionId;
     }
 
-    // 3. Send prompt
-    const blocks: ContentBlock[] = options.systemPrompt
-      ? [
-          { type: 'text', text: options.systemPrompt },
-          { type: 'text', text: options.prompt },
-        ]
-      : [{ type: 'text', text: options.prompt }];
+    // ── prompt + terminal logic (concurrent with consumer) ────────────
+    // Wrapped in a function so it can run concurrently with the consumer
+    // loop below. Without this, session/update notifications pushed to
+    // the queue during prompt processing would be buffered but never
+    // yielded until the prompt response arrived — causing the
+    // withFirstEventTimeout to degenerate into a full-prompt timeout.
+    async function executePrompt(): Promise<void> {
+      // 3. Send prompt
+      const blocks: ContentBlock[] = options.systemPrompt
+        ? [
+            { type: 'text', text: options.systemPrompt },
+            { type: 'text', text: options.prompt },
+          ]
+        : [{ type: 'text', text: options.prompt }];
 
-    const promptReq = createRequest(
-      ACP_METHODS.sessionPrompt,
-      {
-        sessionId,
-        prompt: blocks,
-      },
-      idGen
-    );
-    const promptResp = await sendRequest(promptReq, PROMPT_TIMEOUT_MS);
-    if ('error' in promptResp) {
-      const err = assertJsonRpcError(promptResp.error);
-      throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
-    }
-    // 4. Emit terminal result
-    const result =
-      'result' in promptResp
-        ? assertObjectResult('result' in promptResp ? promptResp.result : undefined)
-        : undefined;
-    const stopReason = result?.stopReason as string | undefined;
-    const responseIsError = result?.isError === true;
-    const tokens = result?.usage
-      ? normalizeAcpUsage(result.usage as Record<string, unknown>)
-      : undefined;
-    emitTerminal({
-      type: 'result',
-      sessionId,
-      stopReason,
-      ...(responseIsError ? { isError: true } : {}),
-      ...(tokens ? { tokens } : {}),
-    });
-    // Send session/close notification (fire-and-forget) per ACP spec.
-    // Skip in prompt-only mode or keepAlive to preserve the existing session.
-    if (sessionId && !options.skipInit && !options.keepAlive) {
+      const promptReq = createRequest(
+        ACP_METHODS.sessionPrompt,
+        {
+          sessionId,
+          prompt: blocks,
+        },
+        idGen
+      );
       try {
-        const data = serializeMessage(
-          createNotification(ACP_METHODS.sessionClose, {
-            sessionId,
-          })
-        );
-        const canWrite = childProcess.stdin?.write(data);
-        if (canWrite === false) {
-          getLog().debug('acp.stdin_backpressure_on_close');
+        const promptResp = await sendRequest(promptReq, PROMPT_TIMEOUT_MS);
+        if ('error' in promptResp) {
+          const err = assertJsonRpcError(promptResp.error);
+          throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
         }
+        // 4. Emit terminal result
+        const result = 'result' in promptResp ? assertObjectResult(promptResp.result) : undefined;
+        const stopReason = result?.stopReason as string | undefined;
+        const responseIsError = result?.isError === true;
+        const tokens = result?.usage
+          ? normalizeAcpUsage(result.usage as Record<string, unknown>)
+          : undefined;
+        emitTerminal({
+          type: 'result',
+          sessionId,
+          stopReason,
+          ...(responseIsError ? { isError: true } : {}),
+          ...(tokens ? { tokens } : {}),
+        });
+        // Send session/close notification (fire-and-forget) per ACP spec.
+        // Skip in prompt-only mode or keepAlive to preserve the existing session.
+        if (sessionId && !options.skipInit && !options.keepAlive) {
+          try {
+            const data = serializeMessage(
+              createNotification(ACP_METHODS.sessionClose, {
+                sessionId,
+              })
+            );
+            const canWrite = childProcess.stdin?.write(data);
+            if (canWrite === false) {
+              getLog().debug('acp.stdin_backpressure_on_close');
+            }
+          } catch (err) {
+            getLog().warn({ err }, 'acp.stdin_write_failed_on_close');
+          }
+        }
+        queue.push({ kind: 'done' });
       } catch (err) {
-        getLog().warn({ err }, 'acp.stdin_write_failed_on_close');
+        getLog().error({ err }, 'hermes.bridge.acp_request_failed');
+        const errorMessage = err instanceof Error ? err.message : String(err);
+        const { errors, errorSubtype } = buildTerminalError(errorMessage, stderrLines);
+        emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+        queue.push({ kind: 'done' });
       }
     }
-    queue.push({ kind: 'done' });
+
+    // Start prompt concurrently — the consumer loop below will yield
+    // session/update notifications as they arrive during prompt processing.
+    void executePrompt();
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -624,6 +641,11 @@ export async function* bridgeHermesSession(
   }
 
   // ── consumer loop ──────────────────────────────────────────────────────
+  // Runs concurrently with executePrompt(). As session/update notifications
+  // arrive during prompt processing, the stdout handler pushes them to the
+  // queue and the consumer yields them immediately — BEFORE the prompt
+  // response arrives. This ensures withFirstEventTimeout in provider.ts
+  // measures actual time-to-first-chunk, not total prompt completion time.
   try {
     for await (const item of queue) {
       if (item.kind === 'done') return;
