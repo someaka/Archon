@@ -1,0 +1,9 @@
+name: e2e-hermes-smoke
+description: Smoke test for Hermes provider. Sends a tiny prompt and verifies non-empty output.
+
+provider: hermes
+
+nodes:
+  - id: smoke-test
+    type: prompt
+    prompt: "Say exactly: HERMES_SMOKE_OK"
