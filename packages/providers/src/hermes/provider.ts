@@ -4,13 +4,14 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import type {
+  HermesProviderDefaults,
   IAgentProvider,
   MessageChunk,
   ProviderCapabilities,
   SendQueryOptions,
 } from '../types';
 import { HERMES_CAPABILITIES } from './capabilities';
-import { parseHermesConfig } from './config';
+import { parseHermesConfig, getHermesLiveConfig } from './config';
 import { bridgeHermesSession } from './event-bridge';
 import { resolveHermesBinary, verifyHermesBinary, INSTALL_INSTRUCTIONS } from './binary-resolver';
 import { resolveHermesSession } from './session-resolver';
@@ -43,6 +44,33 @@ if (!signalHandlersRegistered) {
 }
 
 const MAX_TIMEOUT_MS = 300_000; // 5 minutes
+
+/**
+ * Build the effective Hermes config by merging Archon's assistantConfig with
+ * the live hermes config (~/.hermes/config.yaml).
+ *
+ * Precedence for model/provider:
+ *   1. Explicit options.model (workflow/node specifies model) — caller handles
+ *   2. Live hermes config model/provider (authoritative)
+ *   3. Archon config model/provider (fallback)
+ *
+ * Operational settings (globalAuth, hermesBinaryPath) always come from Archon config.
+ */
+async function buildHermesConfig(
+  assistantConfig: Record<string, unknown>
+): Promise<HermesProviderDefaults> {
+  const archonConfig = parseHermesConfig(assistantConfig);
+  const liveConfig = await getHermesLiveConfig();
+
+  // Live config wins for model/provider; Archon config wins for operational settings
+  return {
+    model: liveConfig.model ?? archonConfig.model,
+    provider: liveConfig.provider ?? archonConfig.provider,
+    endpoint: archonConfig.endpoint, // endpoint stays from Archon config
+    globalAuth: archonConfig.globalAuth,
+    hermesBinaryPath: archonConfig.hermesBinaryPath,
+  };
+}
 
 /** Symlink a file/dir if it exists. Silent no-op on missing source or link error. */
 function trySymlink(source: string, dest: string): void {
@@ -153,8 +181,10 @@ export class HermesProvider implements IAgentProvider {
     resumeSessionId?: string,
     options?: SendQueryOptions
   ): AsyncGenerator<MessageChunk> {
-    // 1. Parse assistant config (.archon/config.yaml assistants.hermes section).
-    const config = parseHermesConfig(options?.assistantConfig ?? {});
+    // 1. Build effective config: merge Archon operational settings with live hermes
+    //    model/provider from ~/.hermes/config.yaml. Live config is authoritative for
+    //    model/provider — Archon config provides operational settings only.
+    const config = await buildHermesConfig(options?.assistantConfig ?? {});
 
     // 2. Resolve session context (cwd, env).
     const session = resolveHermesSession({
@@ -233,13 +263,17 @@ export class HermesProvider implements IAgentProvider {
       modelEnv.HERMES_USE_GLOBAL_AUTH = 'true';
     }
     let tempHermesHome: string | undefined;
-    if (options?.model || config.provider || config.endpoint) {
+    // Only create temp HERMES_HOME when workflow/node explicitly specifies a model.
+    // When no explicit model, hermes reads from its own ~/.hermes/config.yaml —
+    // the live config is authoritative, not Archon's override.
+    if (options?.model) {
       tempHermesHome = mkdtempSync(join(tmpdir(), 'hermes-archon-'));
-      // Build structured config when provider/endpoint are specified;
-      // otherwise write a simple model string for backward compatibility.
+      // When we get here, options.model is guaranteed non-null (per the condition above).
+      // Use the explicit model + any provider/endpoint from config for the temp override.
+      const modelOverride = options.model;
       const hasStructured = config.provider || config.endpoint;
       const modelConfig: Record<string, unknown> = {
-        default: options?.model ?? config.model ?? 'default',
+        default: modelOverride,
       };
       if (config.provider) modelConfig.provider = config.provider;
       if (config.endpoint) modelConfig.base_url = config.endpoint;
@@ -247,7 +281,7 @@ export class HermesProvider implements IAgentProvider {
       writeFileSync(
         join(tempHermesHome, 'config.yaml'),
         Bun.YAML.stringify({
-          model: hasStructured ? modelConfig : (options?.model ?? config.model ?? 'default'),
+          model: hasStructured ? modelConfig : modelOverride,
         })
       );
       // Symlink config files from real HERMES_HOME into temp dir

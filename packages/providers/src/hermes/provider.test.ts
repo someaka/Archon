@@ -39,6 +39,24 @@ mock.module('./binary-resolver', () => ({
   INSTALL_INSTRUCTIONS: '',
 }));
 
+// ─── Mock getHermesLiveConfig so tests don't hit real ~/.hermes/config.yaml ──
+
+const mockGetHermesLiveConfig = mock(async () => ({}));
+
+mock.module('./config', () => ({
+  parseHermesConfig: (raw: Record<string, unknown>) => {
+    // Inline the real parse logic (lightweight, no side effects).
+    const result: Record<string, unknown> = {};
+    if (typeof raw.model === 'string') result.model = raw.model;
+    if (typeof raw.provider === 'string') result.provider = raw.provider;
+    if (typeof raw.endpoint === 'string') result.endpoint = raw.endpoint;
+    if (typeof raw.globalAuth === 'boolean') result.globalAuth = raw.globalAuth;
+    if (typeof raw.hermesBinaryPath === 'string') result.hermesBinaryPath = raw.hermesBinaryPath;
+    return result;
+  },
+  getHermesLiveConfig: mockGetHermesLiveConfig,
+}));
+
 // ─── Mock hermes-mcp-reader so sendQuery doesn't hit the real filesystem ───
 
 const mockReadHermesMcpConfig = mock(async () => []);
@@ -197,6 +215,7 @@ async function consume(generator: AsyncGenerator<unknown>): Promise<{
 describe('HermesProvider', () => {
   beforeEach(() => {
     mockSpawn.mockClear();
+    mockGetHermesLiveConfig.mockClear();
     mockLogger.warn.mockClear();
     mockLogger.error.mockClear();
     mockLogger.debug.mockClear();
