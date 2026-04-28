@@ -19,12 +19,18 @@ import { createLazyLogger } from '../utils/lazy-logger';
 import { withFirstEventTimeout } from './timeout-utils';
 import { readHermesMcpConfig } from './hermes-mcp-reader';
 import { HermesSessionPool } from './session-pool';
+import { ConcurrencyLock } from './concurrency-lock';
+import { classifyHermesError } from './error-classifier';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 const getLog = createLazyLogger('provider.hermes');
 
 /** Module-level session pool singleton — persists across sendQuery calls. */
 const defaultSessionPool = new HermesSessionPool();
+const defaultConcurrencyLock = new ConcurrencyLock();
+
+const MAX_SUBPROCESS_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 2000;
 
 // Clean up pool on process exit to prevent zombie child processes.
 let signalHandlersRegistered = false;
@@ -137,7 +143,10 @@ export function getFirstEventTimeoutMs(): number {
  * supported.
  */
 export class HermesProvider implements IAgentProvider {
-  constructor(private pool: HermesSessionPool = defaultSessionPool) {}
+  constructor(
+    private pool: HermesSessionPool = defaultSessionPool,
+    private lock: ConcurrencyLock = defaultConcurrencyLock
+  ) {}
 
   /**
    * Return the provider type identifier.
@@ -176,6 +185,40 @@ export class HermesProvider implements IAgentProvider {
    * prevention.
    */
   async *sendQuery(
+    prompt: string,
+    cwd: string,
+    resumeSessionId?: string,
+    options?: SendQueryOptions
+  ): AsyncGenerator<MessageChunk> {
+    await this.lock.acquire();
+    try {
+      let lastError: Error | undefined;
+      for (let attempt = 0; attempt <= MAX_SUBPROCESS_RETRIES; attempt++) {
+        if (options?.abortSignal?.aborted) throw new Error('Query aborted');
+        try {
+          yield* this._sendQueryOnce(prompt, cwd, resumeSessionId, options);
+          return;
+        } catch (err) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          const classified = classifyHermesError(error.message);
+          if (!classified.shouldRetry || attempt >= MAX_SUBPROCESS_RETRIES) throw error;
+          const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+          getLog().info({ attempt, delayMs }, 'hermes.retrying_query');
+          await new Promise(resolve => setTimeout(resolve, delayMs));
+          lastError = error;
+        }
+      }
+      throw lastError ?? new Error('Hermes query failed after retries');
+    } finally {
+      this.lock.release();
+    }
+  }
+
+  /**
+   * Execute a single query attempt (no retry or lock).
+   * This is the original sendQuery implementation extracted for retry wrapping.
+   */
+  private async *_sendQueryOnce(
     prompt: string,
     cwd: string,
     resumeSessionId?: string,

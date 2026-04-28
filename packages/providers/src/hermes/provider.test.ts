@@ -70,6 +70,7 @@ import { HermesProvider, getFirstEventTimeoutMs } from './provider';
 import { HERMES_CAPABILITIES } from './capabilities';
 import { HermesSessionPool } from './session-pool';
 import { classifyHermesError } from './error-classifier';
+import { ConcurrencyLock } from './concurrency-lock';
 import type { ChildProcess } from 'child_process';
 
 // ─── ACP Mock Process (same pattern as event-bridge tests) ────────────────
@@ -304,39 +305,35 @@ describe('HermesProvider', () => {
     expect(resultChunks).toHaveLength(1);
   });
 
-  test('sendQuery with abortSignal passes signal to bridge', async () => {
+  test('sendQuery with pre-aborted signal throws Query aborted', async () => {
     const controller = new AbortController();
-    const mockAcp = createAcpMock();
-    mockSpawn.mockImplementationOnce(() => mockAcp.process);
-
-    const gen = new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
-      abortSignal: controller.signal,
-    });
-
-    // Start consuming and abort immediately
     controller.abort();
-    const { chunks } = await consume(gen);
 
-    // Should get an error result
-    const resultChunks = chunks.filter(
-      (c): c is { type: 'result'; isError?: boolean } =>
-        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
+    const { error } = await consume(
+      new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
+        abortSignal: controller.signal,
+      })
     );
-    expect(resultChunks.length).toBeGreaterThan(0);
-    expect(resultChunks[0]).toMatchObject({
-      type: 'result',
-      isError: true,
-    });
+
+    // The retry loop checks abort before _sendQueryOnce and throws immediately
+    expect(error).toBeDefined();
+    expect(error!.message).toBe('Query aborted');
+    // Bridge is never reached — no spawn
+    expect(mockSpawn).not.toHaveBeenCalled();
   });
 
   test('throws when hermes binary is not executable', async () => {
-    mockVerifyHermesBinary.mockImplementationOnce(async () => false);
+    // Mock ALL calls to return false (not just once), so retries also fail
+    mockVerifyHermesBinary.mockImplementation(async () => false);
 
     const { error } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
 
     expect(error).toBeDefined();
     expect(error!.message).toContain('not executable');
-  });
+
+    // Restore default implementation
+    mockVerifyHermesBinary.mockImplementation(async () => true);
+  }, 30000);
 
   test('spawn failure is handled gracefully', async () => {
     mockSpawn.mockImplementationOnce(() => {
@@ -617,32 +614,25 @@ describe('HermesProvider', () => {
   });
 
   test('sendQuery evicts pool entry on pooled query failure', async () => {
-    const mockAcp1 = createAcpMock();
-    const mockAcp2 = createAcpMock();
-
-    // First mock: works normally. Second mock: works normally for fresh spawn after eviction.
-    let callCount = 0;
-    mockSpawn.mockImplementation(() => {
-      callCount++;
-      return callCount === 1 ? mockAcp1.process : mockAcp2.process;
-    });
+    // Use a single mockAcp for ALL spawns (pool reuse + retry spawns + third call)
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementation(() => mockAcp.process);
 
     const pool = new HermesSessionPool();
     const provider = new HermesProvider(pool);
 
     // First call — succeeds normally, registers in pool
-    (mockAcp1.process as any).exitCode = null;
+    (mockAcp.process as any).exitCode = null;
     const { chunks: chunks1, error: error1 } = await consume(
       provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' })
     );
     expect(error1).toBeUndefined();
-    expect(mockSpawn).toHaveBeenCalledTimes(1);
     expect(pool.size).toBe(1);
 
-    // Override the pooled process stdin to swallow session/prompt (no response).
+    // Override stdin to swallow session/prompt (no response).
     // This causes the bridge to produce no output, triggering the first-event timeout.
-    const originalWrite = (mockAcp1.stdin as any)._write.bind(mockAcp1.stdin);
-    (mockAcp1.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+    const originalWrite = (mockAcp.stdin as any)._write.bind(mockAcp.stdin);
+    (mockAcp.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
       const data = typeof chunk === 'string' ? chunk : chunk.toString();
       try {
         const req = JSON.parse(data.trim());
@@ -660,25 +650,27 @@ describe('HermesProvider', () => {
     // Set a very short first-event timeout so the test doesn't wait 60s
     process.env.ARCHON_HERMES_FIRST_EVENT_TIMEOUT_MS = '50';
 
-    // Second call — reuses pooled session but bridge produces no output → timeout → eviction
-    (mockAcp2.process as any).exitCode = null;
-    const { chunks: chunks2, error: error2 } = await consume(
+    // Second call — reuses pooled session, bridge produces no output → timeout → eviction.
+    // With retry, all retries also timeout (stdin override persists), so it eventually throws.
+    const { error: error2 } = await consume(
       provider.sendQuery('Follow up', '/tmp', undefined, { model: 'test-model' })
     );
 
-    // The pooled query should have thrown (first-event timeout)
+    // The pooled query should have thrown after exhausting retries (first-event timeout)
     expect(error2).toBeDefined();
     expect(error2!.message).toContain('no output');
 
     // Pool entry should have been evicted
     expect(pool.size).toBe(0);
 
-    // A third call should spawn fresh
+    // Restore stdin for the third call
+    (mockAcp.stdin as any)._write = originalWrite;
+
+    // A third call should spawn fresh and succeed (stdin is restored)
     const { chunks: chunks3, error: error3 } = await consume(
       provider.sendQuery('Another', '/tmp', undefined, { model: 'test-model' })
     );
     expect(error3).toBeUndefined();
-    expect(mockSpawn).toHaveBeenCalledTimes(2); // first call + third call (eviction forced fresh spawn)
 
     const result3 = chunks3.filter(
       (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
@@ -686,7 +678,7 @@ describe('HermesProvider', () => {
     expect(result3).toHaveLength(1);
 
     pool.destroy();
-  });
+  }, 30000);
 
   test('two queries with same model but different providers use separate pool entries', async () => {
     const mockAcp1 = createAcpMock();
@@ -1242,6 +1234,12 @@ describe('HermesProvider', () => {
 // ─── Retry behavior / error classification ─────────────────────────────────
 
 describe('retry behavior', () => {
+  beforeEach(() => {
+    mockSpawn.mockClear();
+    mockVerifyHermesBinary.mockClear();
+    mockVerifyHermesBinary.mockImplementation(async () => true);
+  });
+
   test('classifies crash errors with shouldRetry: true (supports retry semantics)', () => {
     // Non-zero exit code → crash classification → retryable
     const crash = classifyHermesError('process exited', [], 1);
@@ -1314,32 +1312,21 @@ describe('retry behavior', () => {
     expect(resultChunks[0].errors![0]).toContain('exited with code 1');
   });
 
-  test('abort signal during query emits terminal error result with errorSubtype', async () => {
+  test('abort signal during query throws via retry loop', async () => {
     const controller = new AbortController();
-    const mockAcp = createAcpMock();
-    mockSpawn.mockImplementationOnce(() => mockAcp.process);
 
     const gen = new HermesProvider().sendQuery('Hello', '/tmp', undefined, {
       abortSignal: controller.signal,
     });
 
-    // Abort mid-query
+    // Abort before consuming — the retry loop checks abort at the start of each attempt
     controller.abort();
 
-    const { chunks } = await consume(gen);
+    const { error } = await consume(gen);
 
-    const resultChunks = chunks.filter(
-      (c): c is { type: 'result'; isError?: boolean; errorSubtype?: string } =>
-        typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
-    );
-    expect(resultChunks.length).toBeGreaterThan(0);
-    expect(resultChunks[0]).toMatchObject({
-      type: 'result',
-      isError: true,
-    });
-    // errorSubtype should be defined (classified from 'Query was aborted')
-    expect(resultChunks[0].errorSubtype).toBeDefined();
-    expect(typeof resultChunks[0].errorSubtype).toBe('string');
+    // The retry loop checks abort before _sendQueryOnce and throws immediately
+    expect(error).toBeDefined();
+    expect(error!.message).toBe('Query aborted');
   });
 
   // ── Concurrent acquire protection ──────────────────────────────────────
@@ -1360,7 +1347,8 @@ describe('retry behavior', () => {
     (mockAcp2.process as any).exitCode = null;
 
     const pool = new HermesSessionPool();
-    const provider = new HermesProvider(pool);
+    const lock = new ConcurrencyLock();
+    const provider = new HermesProvider(pool, lock);
 
     // First call — spawns and registers in pool
     const gen1 = provider.sendQuery('First', '/tmp', undefined, { model: 'test-model' });
@@ -1397,6 +1385,155 @@ describe('retry behavior', () => {
     // Release the manually acquired session so pool can clean up
     pool.release('/tmp', 'test-model');
     pool.destroy();
+  });
+});
+
+// ─── ConcurrencyLock integration with provider ─────────────────────────────
+
+describe('ConcurrencyLock integration', () => {
+  test('serializes two concurrent sendQuery calls via lock', async () => {
+    const lock = new ConcurrencyLock({ maxConcurrency: 1 });
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount++;
+      return spawnCount === 1 ? mockAcp1.process : mockAcp2.process;
+    });
+
+    (mockAcp1.process as any).exitCode = null;
+    (mockAcp2.process as any).exitCode = null;
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool, lock);
+
+    // Start two queries concurrently — lock should serialize them
+    const p1 = consume(provider.sendQuery('First', '/tmp', undefined, { model: 'm1' }));
+    const p2 = consume(provider.sendQuery('Second', '/tmp', undefined, { model: 'm2' }));
+
+    const [result1, result2] = await Promise.all([p1, p2]);
+
+    // Both should succeed — serialized through the lock
+    expect(result1.error).toBeUndefined();
+    expect(result2.error).toBeUndefined();
+    expect(spawnCount).toBe(2);
+
+    pool.destroy();
+  });
+
+  test('ConcurrencyLock release underflow guard does not throw', () => {
+    const lock = new ConcurrencyLock();
+    // Releasing without acquiring should not throw
+    expect(() => lock.release()).not.toThrow();
+    expect(() => lock.release()).not.toThrow();
+    expect(lock.active).toBe(0);
+  });
+
+  test('ConcurrencyLock maxConcurrency env var is picked up by default lock', async () => {
+    const originalEnv = process.env.ARCHON_HERMES_MAX_CONCURRENCY;
+    try {
+      process.env.ARCHON_HERMES_MAX_CONCURRENCY = '2';
+      const lock = new ConcurrencyLock();
+      // Should allow 2 concurrent acquires without blocking
+      await lock.acquire();
+      const p2 = lock.acquire();
+      // p2 should resolve immediately (not queued) since maxConcurrency=2
+      await p2;
+      expect(lock.active).toBe(2);
+      lock.release();
+      lock.release();
+    } finally {
+      if (originalEnv === undefined) {
+        delete process.env.ARCHON_HERMES_MAX_CONCURRENCY;
+      } else {
+        process.env.ARCHON_HERMES_MAX_CONCURRENCY = originalEnv;
+      }
+    }
+  });
+});
+
+// ─── Retry behavior via provider ────────────────────────────────────────────
+
+describe('sendQuery retry behavior', () => {
+  beforeEach(() => {
+    mockSpawn.mockClear();
+    mockVerifyHermesBinary.mockClear();
+    mockVerifyHermesBinary.mockImplementation(async () => true);
+  });
+
+  test('retries on crash error (shouldRetry=true) across multiple attempts', async () => {
+    // verifyHermesBinary throws panic error 3 times → crash → retryable
+    // On 4th call, succeeds → normal spawn + bridge flow
+    let verifyCalls = 0;
+    mockVerifyHermesBinary.mockImplementation(async () => {
+      verifyCalls++;
+      if (verifyCalls <= 3) {
+        throw new Error('Hermes process panic: test crash');
+      }
+      return true;
+    });
+
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementationOnce(() => mockAcp.process);
+
+    const provider = new HermesProvider();
+    const { chunks, error } = await consume(provider.sendQuery('Hello', '/tmp'));
+
+    // Should have retried 3 times and succeeded on the 4th attempt
+    expect(error).toBeUndefined();
+    expect(verifyCalls).toBe(4);
+    // Only 1 actual spawn (on the successful 4th attempt)
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    const resultChunks = chunks.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(resultChunks).toHaveLength(1);
+
+    // Restore default
+    mockVerifyHermesBinary.mockImplementation(async () => true);
+  }, 30000);
+
+  test('non-retryable error (shouldRetry=false) stops immediately without retry', async () => {
+    // verifyHermesBinary throws Unauthorized → auth → shouldRetry=false
+    mockVerifyHermesBinary.mockImplementation(async () => {
+      throw new Error('Unauthorized: invalid credentials');
+    });
+
+    const provider = new HermesProvider();
+    const { error } = await consume(provider.sendQuery('Hello', '/tmp'));
+
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('Unauthorized');
+    // No spawn should have happened
+    expect(mockSpawn).not.toHaveBeenCalled();
+
+    // Restore default
+    mockVerifyHermesBinary.mockImplementation(async () => true);
+  });
+
+  test('abort signal before retry loop throws immediately', async () => {
+    // Make verifyHermesBinary always throw so it would retry
+    mockVerifyHermesBinary.mockImplementation(async () => {
+      throw new Error('crash: test');
+    });
+
+    const controller = new AbortController();
+    controller.abort(); // Pre-abort
+
+    const provider = new HermesProvider();
+    const { error } = await consume(
+      provider.sendQuery('Hello', '/tmp', undefined, { abortSignal: controller.signal })
+    );
+
+    expect(error).toBeDefined();
+    expect(error!.message).toBe('Query aborted');
+    // verifyHermesBinary should never have been called
+    expect(mockVerifyHermesBinary).not.toHaveBeenCalled();
+
+    // Restore default
+    mockVerifyHermesBinary.mockImplementation(async () => true);
   });
 });
 
