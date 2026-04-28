@@ -175,7 +175,7 @@ export async function* bridgeHermesSession(
     throw new Error('Hermes ACP child process stdout is not available');
   }
 
-  childProcess.stdout.on('data', (data: Buffer | string) => {
+  const stdoutHandler = (data: Buffer | string): void => {
     const incoming = data.toString();
     if (lineBuffer.length + incoming.length > MAX_LINE_BUFFER_LENGTH) {
       const remaining = Math.max(0, MAX_LINE_BUFFER_LENGTH - lineBuffer.length);
@@ -281,10 +281,11 @@ export async function* bridgeHermesSession(
         }
       }
     }
-  });
+  };
+  childProcess.stdout.on('data', stdoutHandler);
 
   // ── stderr: capture for diagnostics ────────────────────────────────────
-  childProcess.stderr?.on('data', (data: Buffer | string) => {
+  const stderrHandler = (data: Buffer | string): void => {
     const text = data.toString().trim();
     if (text.length > 0) {
       stderrLines.push(text);
@@ -293,7 +294,8 @@ export async function* bridgeHermesSession(
       }
       getLog().warn({ stderr: redactSecrets(text).slice(0, 500) }, 'hermes.bridge.stderr_data');
     }
-  });
+  };
+  childProcess.stderr?.on('data', stderrHandler);
 
   // ── Terminate pending request on process exit/error ────────────────────
   function rejectPending(reason: string): void {
@@ -335,7 +337,7 @@ export async function* bridgeHermesSession(
   }
 
   // ── process exit handling ──────────────────────────────────────────────
-  childProcess.on('exit', (code: number | null, signal: NodeJS.Signals | null) => {
+  const exitHandler = (code: number | null, signal: NodeJS.Signals | null): void => {
     if (sigkillTimeout) {
       clearTimeout(sigkillTimeout);
     }
@@ -373,17 +375,19 @@ export async function* bridgeHermesSession(
     } catch {
       // Last resort — should never happen with AsyncQueue
     }
-  });
+  };
+  childProcess.on('exit', exitHandler);
 
   // ── process error handling (spawn failure, EPIPE, etc.) ────────────────
-  childProcess.on('error', (error: Error) => {
+  const errorHandler = (error: Error): void => {
     getLog().error({ err: error }, 'hermes.bridge.process_error');
     const baseMessage = `Failed to run Hermes ACP: ${error.message}`;
     const { errors, errorSubtype } = buildTerminalError(baseMessage, stderrLines);
     rejectPending(baseMessage);
     emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
     queue.push({ kind: 'done' });
-  });
+  };
+  childProcess.on('error', errorHandler);
 
   // ── abort signal handling ──────────────────────────────────────────────
   let sigkillTimeout: ReturnType<typeof setTimeout> | undefined;
@@ -673,6 +677,13 @@ export async function* bridgeHermesSession(
     if (sigkillTimeout) {
       clearTimeout(sigkillTimeout);
     }
+
+    // Remove process I/O and lifecycle listeners to prevent handler leaks
+    // when the same ChildProcess is reused across pooled sessions.
+    if (childProcess.stdout) childProcess.stdout.removeListener('data', stdoutHandler);
+    if (childProcess.stderr) childProcess.stderr.removeListener('data', stderrHandler);
+    childProcess.removeListener('exit', exitHandler);
+    childProcess.removeListener('error', errorHandler);
 
     // Ensure the child process is definitely killed if still running.
     // Skip in prompt-only mode or keepAlive to preserve the existing session.

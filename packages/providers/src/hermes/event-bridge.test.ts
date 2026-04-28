@@ -1259,6 +1259,74 @@ describe('bridgeHermesSession', () => {
     expect(typeof result.errorSubtype).toBe('string');
   });
 
+  // ── Handler cleanup (listener leak prevention) ─────────────────────────
+
+  test('stdout listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+
+    const baseline = mock.process.stdout!.listenerCount('data');
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+    expect(mock.process.stdout!.listenerCount('data')).toBe(baseline);
+  });
+
+  test('stderr listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+
+    const baseline = mock.process.stderr!.listenerCount('data');
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+    expect(mock.process.stderr!.listenerCount('data')).toBe(baseline);
+  });
+
+  test('exit listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+
+    const baseline = mock.process.listenerCount('exit');
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+    expect(mock.process.listenerCount('exit')).toBe(baseline);
+  });
+
+  test('error listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+
+    const baseline = mock.process.listenerCount('error');
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+    expect(mock.process.listenerCount('error')).toBe(baseline);
+  });
+
+  test('pooled session does not accumulate handlers across multiple bridges', async () => {
+    // Simulate a pooled session: same ChildProcess used for multiple bridge calls
+    const mock = createAcpMock({ updates: [{ sessionUpdate: 'agent_message_chunk', text: 'hi' }] });
+    const proc = mock.process;
+
+    const stdoutBaseline = proc.stdout!.listenerCount('data');
+    const stderrBaseline = proc.stderr!.listenerCount('data');
+    const exitBaseline = proc.listenerCount('exit');
+    const errorBaseline = proc.listenerCount('error');
+
+    // Run 3 sequential bridges on the same process
+    for (let i = 0; i < 3; i++) {
+      const freshMock = createAcpMock({
+        updates: [{ sessionUpdate: 'agent_message_chunk', text: `round ${i}` }],
+      });
+      // Reuse the same EventEmitter-based process (but with fresh streams for each round)
+      proc.stdout = freshMock.stdout;
+      proc.stderr = freshMock.stderr;
+      proc.stdin = freshMock.stdin;
+
+      await consume(
+        bridgeHermesSession(
+          proc,
+          makeBridgeOptions({ keepAlive: true, skipInit: true, existingSessionId: 'pool-1' })
+        )
+      );
+    }
+
+    expect(proc.stdout!.listenerCount('data')).toBe(stdoutBaseline);
+    expect(proc.stderr!.listenerCount('data')).toBe(stderrBaseline);
+    expect(proc.listenerCount('exit')).toBe(exitBaseline);
+    expect(proc.listenerCount('error')).toBe(errorBaseline);
+  });
+
   test('initialize response parses agentCapabilities and agentInfo', async () => {
     const mock = createAcpMock({
       initResult: {
