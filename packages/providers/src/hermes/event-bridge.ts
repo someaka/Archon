@@ -359,9 +359,20 @@ export async function* bridgeHermesSession(
     } else {
       // Clean exit (code 0 or null) — reject any pending request to avoid 30s timeout
       rejectPending('Hermes ACP process exited unexpectedly');
+      // Emit a terminal result so the consumer yields it before 'done'.
+      // Without this, the consumer sees 'done' first and returns, dropping
+      // the terminal event that executePrompt's catch block would produce
+      // as a microtask (race condition: synchronous 'done' vs microtask terminal).
+      emitTerminal({ type: 'result', stopReason: 'clean_exit' });
     }
 
-    queue.push({ kind: 'done' });
+    // Defensive: wrap in try-catch so 'done' is always pushed even if
+    // emitTerminal or buildTerminalError throws.
+    try {
+      queue.push({ kind: 'done' });
+    } catch {
+      // Last resort — should never happen with AsyncQueue
+    }
   });
 
   // ── process error handling (spawn failure, EPIPE, etc.) ────────────────
