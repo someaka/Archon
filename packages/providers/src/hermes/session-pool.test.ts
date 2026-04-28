@@ -228,4 +228,92 @@ describe('HermesSessionPool', () => {
     expect(pool.get('/tmp', 'model', undefined)).toBe(session);
     expect(pool.get('/tmp', 'model', '')).toBe(session);
   });
+
+  // ── acquire/release semantics ───────────────────────────────────────────
+
+  test('acquire returns session and marks inUse', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    const acquired = pool.acquire('/tmp', 'model');
+    expect(acquired).toBe(session);
+    expect(acquired!.inUse).toBe(true);
+  });
+
+  test('acquire returns undefined when session is already inUse', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    const first = pool.acquire('/tmp', 'model');
+    expect(first).toBe(session);
+
+    const second = pool.acquire('/tmp', 'model');
+    expect(second).toBeUndefined();
+  });
+
+  test('release clears inUse flag and allows re-acquire', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    pool.acquire('/tmp', 'model');
+    pool.release('/tmp', 'model');
+
+    expect(session.inUse).toBe(false);
+
+    const reacquired = pool.acquire('/tmp', 'model');
+    expect(reacquired).toBe(session);
+    expect(reacquired!.inUse).toBe(true);
+  });
+
+  test('release for non-existent key is a no-op', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    expect(() => pool.release('/nonexistent', 'model')).not.toThrow();
+  });
+
+  test('cleanup does not evict inUse sessions', async () => {
+    pool = new HermesSessionPool({
+      idleTimeoutMs: 50,
+      maxAgeMs: 50,
+      cleanupIntervalMs: 20,
+    });
+    const cp = mockChildProcess();
+    const session = makeSession({ childProcess: cp });
+    pool.set('/tmp', 'model', session);
+
+    // Acquire so it's marked inUse
+    pool.acquire('/tmp', 'model');
+
+    // Wait past both idle and age timeouts
+    await new Promise(r => setTimeout(r, 150));
+
+    // Session should NOT have been killed — it's inUse
+    expect(cp.kill).not.toHaveBeenCalled();
+    expect(pool.size).toBe(1);
+  });
+
+  test('get() still returns inUse sessions (read-only access)', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    pool.set('/tmp', 'model', session);
+
+    pool.acquire('/tmp', 'model');
+
+    // get() is read-only — should still return the inUse session
+    const result = pool.get('/tmp', 'model');
+    expect(result).toBe(session);
+  });
+
+  test('set() initializes session.inUse to false', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession();
+    // Manually set inUse to true to verify set() resets it
+    (session as any).inUse = true;
+
+    pool.set('/tmp', 'model', session);
+
+    expect(session.inUse).toBe(false);
+  });
 });

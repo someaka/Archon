@@ -197,7 +197,7 @@ export class HermesProvider implements IAgentProvider {
     const model = options?.model ?? config.model ?? 'default';
 
     // 3. Check session pool for an existing session (keyed by cwd + provider + model).
-    const pooled = this.pool.get(session.cwd, model, config.provider);
+    const pooled = this.pool.acquire(session.cwd, model, config.provider);
     if (pooled && !pooled.childProcess.killed && pooled.childProcess.exitCode === null) {
       getLog().debug(
         { cwd: session.cwd, model, sessionId: pooled.sessionId },
@@ -234,6 +234,9 @@ export class HermesProvider implements IAgentProvider {
         getLog().error({ err }, 'hermes.pooled_query_failed');
         throw err;
       } finally {
+        // Release the session back to the pool (success or error path —
+        // delete() above handles eviction on error, release is a no-op then).
+        this.pool.release(session.cwd, model, config.provider);
         // Signal bridge to close queue and remove listeners (but NOT kill the
         // process — keepAlive: true handles that).
         void bridge.return(undefined);
@@ -379,6 +382,7 @@ export class HermesProvider implements IAgentProvider {
             model,
             createdAt: Date.now(),
             lastUsed: Date.now(),
+            inUse: false,
           },
           config.provider
         );

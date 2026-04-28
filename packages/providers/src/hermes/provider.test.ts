@@ -1341,6 +1341,63 @@ describe('retry behavior', () => {
     expect(resultChunks[0].errorSubtype).toBeDefined();
     expect(typeof resultChunks[0].errorSubtype).toBe('string');
   });
+
+  // ── Concurrent acquire protection ──────────────────────────────────────
+
+  test('acquire prevents second sendQuery from reusing inUse pooled session', async () => {
+    // Create two separate ACP mocks — one for the initial spawn, one for the
+    // second call that must spawn fresh because the first is inUse.
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    let spawnCount = 0;
+    mockSpawn.mockImplementation(() => {
+      spawnCount++;
+      return spawnCount === 1 ? mockAcp1.process : mockAcp2.process;
+    });
+
+    (mockAcp1.process as any).exitCode = null;
+    (mockAcp2.process as any).exitCode = null;
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — spawns and registers in pool
+    const gen1 = provider.sendQuery('First', '/tmp', undefined, { model: 'test-model' });
+    // Consume first call to completion (pooling happens in finally)
+    const { chunks: chunks1 } = await consume(gen1);
+    expect(spawnCount).toBe(1);
+    expect(pool.size).toBe(1);
+
+    // Now manually acquire the session to simulate an in-use state
+    // (as if another concurrent sendQuery had already acquired it).
+    const acquired = pool.acquire('/tmp', 'test-model');
+    expect(acquired).toBeDefined();
+    expect(acquired!.inUse).toBe(true);
+
+    // Second call — acquire in provider should get undefined (session inUse),
+    // so it falls through to the full spawn path.
+    const { chunks: chunks2 } = await consume(
+      provider.sendQuery('Second', '/tmp', undefined, { model: 'test-model' })
+    );
+
+    // A second spawn must have occurred
+    expect(spawnCount).toBe(2);
+
+    // Both queries should have succeeded
+    const result1 = chunks1.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result1).toHaveLength(1);
+    const result2 = chunks2.filter(
+      (c): c is { type: 'result' } => (c as { type?: string })?.type === 'result'
+    );
+    expect(result2).toHaveLength(1);
+
+    // Release the manually acquired session so pool can clean up
+    pool.release('/tmp', 'test-model');
+    pool.destroy();
+  });
 });
 
 // ─── getFirstEventTimeoutMs ─────────────────────────────────────────────────

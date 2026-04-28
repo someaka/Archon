@@ -7,6 +7,7 @@ export interface PooledSession {
   model: string;
   createdAt: number;
   lastUsed: number;
+  inUse: boolean;
 }
 
 export interface SessionPoolConfig {
@@ -47,12 +48,44 @@ export class HermesSessionPool {
     return session;
   }
 
+  /**
+   * Acquire a session for exclusive use. Returns the session and marks it
+   * inUse=true. Returns undefined if the session is already inUse (another
+   * caller holds it).
+   */
+  acquire(cwd: string, model: string, provider?: string): PooledSession | undefined {
+    const key = this.makeKey(cwd, model, provider);
+    const session = this.sessions.get(key);
+    if (session) {
+      if (session.inUse) {
+        return undefined;
+      }
+      session.inUse = true;
+      session.lastUsed = Date.now();
+      return session;
+    }
+    return undefined;
+  }
+
+  /**
+   * Release a previously acquired session. Sets inUse=false so the session
+   * can be acquired again. No-op if the key doesn't exist.
+   */
+  release(cwd: string, model: string, provider?: string): void {
+    const key = this.makeKey(cwd, model, provider);
+    const session = this.sessions.get(key);
+    if (session) {
+      session.inUse = false;
+    }
+  }
+
   set(cwd: string, model: string, session: PooledSession, provider?: string): void {
     const key = this.makeKey(cwd, model, provider);
     const existing = this.sessions.get(key);
     if (existing) {
       this.killSession(existing);
     }
+    session.inUse = false;
     session.childProcess.unref();
     this.sessions.set(key, session);
   }
@@ -77,6 +110,7 @@ export class HermesSessionPool {
   private cleanup(): void {
     const now = Date.now();
     for (const [key, session] of this.sessions) {
+      if (session.inUse) continue;
       const idleMs = now - session.lastUsed;
       const ageMs = now - session.createdAt;
       if (idleMs > this.config.idleTimeoutMs || ageMs > this.config.maxAgeMs) {
