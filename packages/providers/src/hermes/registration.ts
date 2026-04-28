@@ -1,7 +1,6 @@
 import { isRegisteredProvider, registerProvider } from '../registry';
 
 import { HERMES_CAPABILITIES } from './capabilities';
-import { isHermesModelCompatible } from './model-ref';
 import { HermesProvider } from './provider';
 
 /**
@@ -19,7 +18,6 @@ export function registerHermesProvider(): void {
     displayName: 'Hermes Agent (Nous Research)',
     factory: () => new HermesProvider(),
     capabilities: HERMES_CAPABILITIES,
-    isModelCompatible: isHermesModelCompatible,
     builtIn: true,
   });
 }
