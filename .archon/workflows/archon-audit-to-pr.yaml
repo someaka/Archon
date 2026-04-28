@@ -320,7 +320,6 @@ nodes:
   # ═══════════════════════════════════════════════════════════════
 
   - id: implement-fixes
-    model: kimi-k2.6
     prompt: |
       You are implementing audit fixes with strict safety guardrails.
 
