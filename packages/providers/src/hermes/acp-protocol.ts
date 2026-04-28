@@ -49,13 +49,14 @@ export interface AcpIdGenerator {
   next(): number;
 }
 
-export function createAcpIdGenerator(start = 1): AcpIdGenerator {
-  let nextId = start;
+/** Module-level monotonic counter for JSON-RPC request IDs. */
+let globalAcpIdCounter = 0;
+
+export function createAcpIdGenerator(): AcpIdGenerator {
   return {
     next: (): number => {
-      const id = nextId;
-      nextId = (nextId % Number.MAX_SAFE_INTEGER) + 1;
-      return id;
+      globalAcpIdCounter = (globalAcpIdCounter % Number.MAX_SAFE_INTEGER) + 1;
+      return globalAcpIdCounter;
     },
   };
 }

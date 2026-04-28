@@ -83,12 +83,51 @@ describe('ACP protocol', () => {
     expect(serialized.method).toBe('session/cancel');
   });
 
-  test('AcpIdGenerator wraps at MAX_SAFE_INTEGER', () => {
-    const gen = createAcpIdGenerator(Number.MAX_SAFE_INTEGER);
-    const lastId = gen.next();
-    expect(lastId).toBe(Number.MAX_SAFE_INTEGER);
-    const wrappedId = gen.next();
-    expect(wrappedId).toBe(1);
+  test('AcpIdGenerator always returns positive IDs (> 0)', () => {
+    const gen = createAcpIdGenerator();
+    // Generate many IDs — none should be zero or negative
+    for (let i = 0; i < 100; i++) {
+      expect(gen.next()).toBeGreaterThan(0);
+    }
+  });
+
+  test('AcpIdGenerator IDs are strictly monotonically increasing', () => {
+    const gen = createAcpIdGenerator();
+    let prev = gen.next();
+    for (let i = 0; i < 100; i++) {
+      const curr = gen.next();
+      expect(curr).toBeGreaterThan(prev);
+      prev = curr;
+    }
+  });
+
+  test('two generators produce non-overlapping ID sequences', () => {
+    const genA = createAcpIdGenerator();
+    const genB = createAcpIdGenerator();
+    const idsA = new Set<number>();
+    const idsB = new Set<number>();
+    for (let i = 0; i < 50; i++) {
+      idsA.add(genA.next());
+      idsB.add(genB.next());
+    }
+    // No ID from genA should appear in genB
+    for (const id of idsA) {
+      expect(idsB.has(id)).toBe(false);
+    }
+  });
+
+  test('produces globally unique IDs across multiple instances', () => {
+    const generators = Array.from({ length: 10 }, () => createAcpIdGenerator());
+    const allIds = new Set<number>();
+    for (const gen of generators) {
+      for (let i = 0; i < 100; i++) {
+        const id = gen.next();
+        // All IDs must be unique (no duplicates across any generators)
+        expect(allIds.has(id)).toBe(false);
+        allIds.add(id);
+      }
+    }
+    expect(allIds.size).toBe(1000);
   });
 
   test('parseMessage returns null for empty string', () => {
