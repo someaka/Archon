@@ -1,7 +1,7 @@
-import type { ChildProcess } from 'node:child_process';
+import type { HermesAcpClient } from './acp-client';
 
 export interface PooledSession {
-  childProcess: ChildProcess;
+  client: HermesAcpClient;
   sessionId: string;
   cwd: string;
   model: string;
@@ -86,7 +86,7 @@ export class HermesSessionPool {
       this.killSession(existing);
     }
     session.inUse = false;
-    session.childProcess.unref();
+    session.client.childProcess.unref();
     this.sessions.set(key, session);
   }
 
@@ -101,7 +101,7 @@ export class HermesSessionPool {
 
   private killSession(session: PooledSession): void {
     try {
-      session.childProcess.kill('SIGKILL');
+      session.client.dispose();
     } catch {
       // Process may already be dead (ESRCH) or we lack permissions (EPERM)
     }

@@ -1,4 +1,3 @@
-import { spawn } from 'child_process';
 import { mkdtempSync, writeFileSync, rmSync, symlinkSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -12,7 +11,7 @@ import type {
 } from '../types';
 import { HERMES_CAPABILITIES } from './capabilities';
 import { parseHermesConfig, getHermesLiveConfig } from './config';
-import { bridgeHermesSession } from './event-bridge';
+import { HermesAcpClient } from './acp-client';
 import { resolveHermesBinary, verifyHermesBinary, INSTALL_INSTRUCTIONS } from './binary-resolver';
 import { resolveHermesSession } from './session-resolver';
 import { createLazyLogger } from '../utils/lazy-logger';
@@ -118,23 +117,24 @@ export function getFirstEventTimeoutMs(): number {
 }
 
 /**
- * Hermes provider — wraps the Hermes CLI tool (invoked via
- * `child_process.spawn`). Uses the ACP (Agent Client Protocol) JSON-RPC 2.0
- * stdio transport for structured communication.
+ * Hermes provider — wraps the Hermes CLI tool via {@link HermesAcpClient}.
+ * Uses the ACP (Agent Client Protocol) JSON-RPC 2.0 stdio transport for
+ * structured communication.
  *
- * Each `sendQuery()` call spawns a fresh `hermes acp` process. The
- * {@link bridgeHermesSession} function in `event-bridge.ts` handles the
- * ACP lifecycle: `initialize` → `session/new` → `session/prompt`, with
- * streaming `session/update` notifications bridged into Archon's
- * `AsyncGenerator<MessageChunk>` contract.
+ * Each `sendQuery()` call creates a fresh {@link HermesAcpClient} which
+ * spawns `hermes acp` and runs the full ACP handshake (`initialize` →
+ * `session/new` → `session/prompt`), with streaming `session/update`
+ * notifications bridged into Archon's `AsyncGenerator<MessageChunk>`
+ * contract. All ACP interaction is delegated to the client.
  *
- * Session pooling: A module-level {@link HermesSessionPool} persists child
- * processes across sendQuery calls for the same cwd+model key. The first
- * query spawns a new process with `keepAlive: true` (full ACP init, but
- * the child is not killed after completion). Subsequent queries with the
- * same key reuse the pooled process via `skipInit: true` mode, enabling
- * true multi-turn conversation continuity. The pool automatically cleans
- * up idle/aged sessions and is destroyed on process exit.
+ * Session pooling: A module-level {@link HermesSessionPool} persists
+ * {@link HermesAcpClient} instances across sendQuery calls for the same
+ * cwd+model key. The first query creates a client with `keepAlive: true`
+ * (full ACP init, but the child is not killed after completion).
+ * Subsequent queries with the same key reuse the pooled client via
+ * `prompt()` (skipInit mode), enabling true multi-turn conversation
+ * continuity. The pool automatically cleans up idle/aged sessions and
+ * is destroyed on process exit.
  *
  * v1 capabilities: sessionResume and mcp are true; the rest are false
  * (see `capabilities.ts`). These map to Hermes features but require
@@ -241,32 +241,24 @@ export class HermesProvider implements IAgentProvider {
 
     // 3. Check session pool for an existing session (keyed by cwd + provider + model).
     const pooled = this.pool.acquire(session.cwd, model, config.provider);
-    if (pooled && !pooled.childProcess.killed && pooled.childProcess.exitCode === null) {
+    if (pooled?.client.isAlive()) {
       getLog().debug(
         { cwd: session.cwd, model, sessionId: pooled.sessionId },
         'hermes.reusing_pooled_session'
       );
 
-      // Re-read MCP config (lightweight, keeps bridge contract simple).
+      // Re-read MCP config (lightweight, keeps client contract simple).
       const mcpServers = await readHermesMcpConfig();
 
-      // Reuse existing pooled session — prompt-only mode.
-      const bridge = bridgeHermesSession(
-        pooled.childProcess,
-        {
-          prompt,
-          cwd: session.cwd,
-          systemPrompt: options?.systemPrompt,
-          mcpServers,
-          skipInit: true,
-          existingSessionId: pooled.sessionId,
-          keepAlive: true,
-        },
-        options?.abortSignal
-      );
+      // Reuse existing pooled session — prompt-only mode via HermesAcpClient.
+      const clientPrompt = pooled.client.prompt(prompt, {
+        systemPrompt: options?.systemPrompt,
+        mcpServers,
+        abortSignal: options?.abortSignal,
+      });
       try {
         yield* withFirstEventTimeout(
-          bridge,
+          clientPrompt,
           getFirstEventTimeoutMs(),
           `hermes acp pooled cwd=${session.cwd}`
         );
@@ -280,9 +272,9 @@ export class HermesProvider implements IAgentProvider {
         // Release the session back to the pool (success or error path —
         // delete() above handles eviction on error, release is a no-op then).
         this.pool.release(session.cwd, model, config.provider);
-        // Signal bridge to close queue and remove listeners (but NOT kill the
-        // process — keepAlive: true handles that).
-        void bridge.return(undefined);
+        // Signal client prompt generator to close and clean up (but NOT kill the
+        // process — the client's keepAlive handles that).
+        void clientPrompt.return(undefined);
       }
       return;
     }
@@ -360,33 +352,28 @@ export class HermesProvider implements IAgentProvider {
       'hermes.spawning_acp'
     );
 
-    // 5. Spawn `hermes acp` with piped stdio.
-    const child = spawn(hermesBinary, ['acp'], {
-      cwd: session.cwd,
+    // 5. Create HermesAcpClient — spawns `hermes acp` with piped stdio.
+    const client = new HermesAcpClient({
+      binary: hermesBinary,
+      args: ['acp'],
       env: { ...session.env, ...modelEnv },
-      stdio: ['pipe', 'pipe', 'pipe'],
+      cwd: session.cwd,
     });
 
-    // 6. Bridge the ACP session with keepAlive — yield all chunks, intercept
+    // 6. Run full ACP handshake via client.init() — yield all chunks, intercept
     // the result chunk to capture sessionId for pool registration.
-    const bridge = bridgeHermesSession(
-      child,
-      {
-        prompt,
-        cwd: session.cwd,
-        systemPrompt: options?.systemPrompt,
-        mcpServers,
-        keepAlive: true,
-      },
-      options?.abortSignal
-    );
+    const clientInit = client.init(prompt, {
+      systemPrompt: options?.systemPrompt,
+      mcpServers,
+      abortSignal: options?.abortSignal,
+    });
 
     let capturedSessionId: string | undefined;
     let queryFailed = false;
 
     try {
       const timeouted = withFirstEventTimeout(
-        bridge,
+        clientInit,
         getFirstEventTimeoutMs(),
         `hermes acp cwd=${session.cwd}`
       );
@@ -407,7 +394,7 @@ export class HermesProvider implements IAgentProvider {
       throw err;
     } finally {
       // Signal bridge to close queue and remove listeners.
-      void bridge.return(undefined);
+      void clientInit.return(undefined);
 
       if (capturedSessionId && !queryFailed) {
         // Success — register in pool for reuse by subsequent queries.
@@ -419,7 +406,7 @@ export class HermesProvider implements IAgentProvider {
           session.cwd,
           model,
           {
-            childProcess: child,
+            client,
             sessionId: capturedSessionId,
             cwd: session.cwd,
             model,
@@ -431,17 +418,13 @@ export class HermesProvider implements IAgentProvider {
         );
         // Clean up tempHermesHome when the pooled process eventually exits.
         if (tempHermesHome) {
-          child.on('exit', () => {
+          client.childProcess.on('exit', () => {
             cleanupTempDir(tempHermesHome);
           });
         }
       } else {
         // Failed or no sessionId — kill the process and clean up immediately.
-        try {
-          child.kill('SIGKILL');
-        } catch {
-          /* already dead */
-        }
+        client.dispose();
         cleanupTempDir(tempHermesHome);
       }
     }

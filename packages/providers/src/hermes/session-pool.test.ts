@@ -1,17 +1,21 @@
 import { describe, test, expect, mock, beforeEach, afterEach } from 'bun:test';
 import { HermesSessionPool, type PooledSession, type SessionPoolConfig } from './session-pool';
-import type { ChildProcess } from 'node:child_process';
+import type { HermesAcpClient } from './acp-client';
 
-function mockChildProcess(): ChildProcess {
+function mockHermesAcpClient(): HermesAcpClient {
   return {
-    kill: mock(() => true),
-    unref: mock(() => {}),
-  } as unknown as ChildProcess;
+    dispose: mock(() => {}),
+    isAlive: mock(() => true),
+    childProcess: {
+      unref: mock(() => {}),
+      kill: mock(() => true),
+    },
+  } as unknown as HermesAcpClient;
 }
 
 function makeSession(overrides?: Partial<PooledSession>): PooledSession {
   return {
-    childProcess: mockChildProcess(),
+    client: mockHermesAcpClient(),
     sessionId: 'test-session-1',
     cwd: '/tmp',
     model: 'test-model',
@@ -45,13 +49,13 @@ describe('HermesSessionPool', () => {
 
   test('delete kills the process and removes from pool', () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
-    const cp = mockChildProcess();
-    const session = makeSession({ childProcess: cp });
+    const client = mockHermesAcpClient();
+    const session = makeSession({ client });
     pool.set('/tmp', 'model', session);
 
     pool.delete('/tmp', 'model');
 
-    expect(cp.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(client.dispose).toHaveBeenCalled();
     expect(pool.get('/tmp', 'model')).toBeUndefined();
     expect(pool.size).toBe(0);
   });
@@ -62,8 +66,8 @@ describe('HermesSessionPool', () => {
       maxAgeMs: 600_000,
       cleanupIntervalMs: 600_000, // don't auto-trigger, we'll call cleanup manually
     });
-    const cp = mockChildProcess();
-    const session = makeSession({ childProcess: cp });
+    const client = mockHermesAcpClient();
+    const session = makeSession({ client });
     pool.set('/tmp', 'model', session);
 
     // Wait for idle timeout to elapse
@@ -77,13 +81,13 @@ describe('HermesSessionPool', () => {
       maxAgeMs: 600_000,
       cleanupIntervalMs: 20,
     });
-    const cp2 = mockChildProcess();
-    const session2 = makeSession({ childProcess: cp2 });
+    const client2 = mockHermesAcpClient();
+    const session2 = makeSession({ client: client2 });
     pool.set('/tmp', 'model', session2);
 
     await new Promise(r => setTimeout(r, 100));
 
-    expect(cp2.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(client2.dispose).toHaveBeenCalled();
     expect(pool.size).toBe(0);
   });
 
@@ -93,27 +97,27 @@ describe('HermesSessionPool', () => {
       maxAgeMs: 50,
       cleanupIntervalMs: 20,
     });
-    const cp = mockChildProcess();
-    const session = makeSession({ childProcess: cp });
+    const client = mockHermesAcpClient();
+    const session = makeSession({ client });
     pool.set('/tmp', 'model', session);
 
     await new Promise(r => setTimeout(r, 100));
 
-    expect(cp.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(client.dispose).toHaveBeenCalled();
     expect(pool.size).toBe(0);
   });
 
   test('destroy kills all sessions and clears the pool', () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
-    const cp1 = mockChildProcess();
-    const cp2 = mockChildProcess();
-    pool.set('/dir1', 'm1', makeSession({ childProcess: cp1 }));
-    pool.set('/dir2', 'm2', makeSession({ childProcess: cp2 }));
+    const client1 = mockHermesAcpClient();
+    const client2 = mockHermesAcpClient();
+    pool.set('/dir1', 'm1', makeSession({ client: client1 }));
+    pool.set('/dir2', 'm2', makeSession({ client: client2 }));
 
     pool.destroy();
 
-    expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
-    expect(cp2.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(client1.dispose).toHaveBeenCalled();
+    expect(client2.dispose).toHaveBeenCalled();
     expect(pool.size).toBe(0);
   });
 
@@ -125,15 +129,15 @@ describe('HermesSessionPool', () => {
 
   test('set overwrites existing session and kills old process', () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
-    const cp1 = mockChildProcess();
-    const cp2 = mockChildProcess();
-    pool.set('/tmp', 'model', makeSession({ childProcess: cp1 }));
-    pool.set('/tmp', 'model', makeSession({ childProcess: cp2 }));
+    const client1 = mockHermesAcpClient();
+    const client2 = mockHermesAcpClient();
+    pool.set('/tmp', 'model', makeSession({ client: client1 }));
+    pool.set('/tmp', 'model', makeSession({ client: client2 }));
     expect(pool.size).toBe(1);
-    // Old process should have been killed
-    expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
+    // Old process should have been killed via dispose
+    expect(client1.dispose).toHaveBeenCalled();
     pool.delete('/tmp', 'model');
-    expect(cp2.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(client2.dispose).toHaveBeenCalled();
   });
 
   test('cleanup timer kills only idle sessions, not recently-used ones', async () => {
@@ -142,20 +146,20 @@ describe('HermesSessionPool', () => {
       maxAgeMs: 600_000,
       cleanupIntervalMs: 50,
     });
-    const cpIdle = mockChildProcess();
-    const cpActive = mockChildProcess();
-    pool.set('/dir1', 'm1', makeSession({ childProcess: cpIdle }));
-    pool.set('/dir2', 'm2', makeSession({ childProcess: cpActive }));
+    const clientIdle = mockHermesAcpClient();
+    const clientActive = mockHermesAcpClient();
+    pool.set('/dir1', 'm1', makeSession({ client: clientIdle }));
+    pool.set('/dir2', 'm2', makeSession({ client: clientActive }));
 
-    // Keep cpActive active
+    // Keep clientActive active
     const interval = setInterval(() => {
       pool.get('/dir2', 'm2');
     }, 30);
     await new Promise(r => setTimeout(r, 200));
     clearInterval(interval);
 
-    expect(cpIdle.kill).toHaveBeenCalled();
-    expect(cpActive.kill).not.toHaveBeenCalled();
+    expect(clientIdle.dispose).toHaveBeenCalled();
+    expect(clientActive.dispose).not.toHaveBeenCalled();
     expect(pool.size).toBe(1);
   });
 
@@ -175,10 +179,10 @@ describe('HermesSessionPool', () => {
 
   test('provider parameter isolates sessions with same cwd and model', () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
-    const cp1 = mockChildProcess();
-    const cp2 = mockChildProcess();
-    const session1 = makeSession({ childProcess: cp1, sessionId: 'session-openai' });
-    const session2 = makeSession({ childProcess: cp2, sessionId: 'session-anthropic' });
+    const client1 = mockHermesAcpClient();
+    const client2 = mockHermesAcpClient();
+    const session1 = makeSession({ client: client1, sessionId: 'session-openai' });
+    const session2 = makeSession({ client: client2, sessionId: 'session-anthropic' });
 
     pool.set('/tmp', 'gpt-4', session1, 'openai');
     pool.set('/tmp', 'gpt-4', session2, 'anthropic');
@@ -205,15 +209,15 @@ describe('HermesSessionPool', () => {
 
   test("delete with provider only removes that provider's session", () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
-    const cp1 = mockChildProcess();
-    const cp2 = mockChildProcess();
-    pool.set('/tmp', 'model', makeSession({ childProcess: cp1 }), 'openai');
-    pool.set('/tmp', 'model', makeSession({ childProcess: cp2 }), 'anthropic');
+    const client1 = mockHermesAcpClient();
+    const client2 = mockHermesAcpClient();
+    pool.set('/tmp', 'model', makeSession({ client: client1 }), 'openai');
+    pool.set('/tmp', 'model', makeSession({ client: client2 }), 'anthropic');
 
     pool.delete('/tmp', 'model', 'openai');
 
-    expect(cp1.kill).toHaveBeenCalledWith('SIGKILL');
-    expect(cp2.kill).not.toHaveBeenCalled();
+    expect(client1.dispose).toHaveBeenCalled();
+    expect(client2.dispose).not.toHaveBeenCalled();
     expect(pool.size).toBe(1);
     expect(pool.get('/tmp', 'model', 'anthropic')).toBeDefined();
     expect(pool.get('/tmp', 'model', 'openai')).toBeUndefined();
@@ -279,8 +283,8 @@ describe('HermesSessionPool', () => {
       maxAgeMs: 50,
       cleanupIntervalMs: 20,
     });
-    const cp = mockChildProcess();
-    const session = makeSession({ childProcess: cp });
+    const client = mockHermesAcpClient();
+    const session = makeSession({ client });
     pool.set('/tmp', 'model', session);
 
     // Acquire so it's marked inUse
@@ -290,7 +294,7 @@ describe('HermesSessionPool', () => {
     await new Promise(r => setTimeout(r, 150));
 
     // Session should NOT have been killed — it's inUse
-    expect(cp.kill).not.toHaveBeenCalled();
+    expect(client.dispose).not.toHaveBeenCalled();
     expect(pool.size).toBe(1);
   });
 
