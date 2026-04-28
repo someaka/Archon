@@ -565,7 +565,7 @@ export async function* bridgeHermesSession(
     // the queue during prompt processing would be buffered but never
     // yielded until the prompt response arrived — causing the
     // withFirstEventTimeout to degenerate into a full-prompt timeout.
-    async function executePrompt(): Promise<void> {
+    const executePrompt = async (): Promise<void> => {
       // 3. Send prompt
       const blocks: ContentBlock[] = options.systemPrompt
         ? [
@@ -627,7 +627,7 @@ export async function* bridgeHermesSession(
         emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
         queue.push({ kind: 'done' });
       }
-    }
+    };
 
     // Start prompt concurrently — the consumer loop below will yield
     // session/update notifications as they arrive during prompt processing.
