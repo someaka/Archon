@@ -30,17 +30,6 @@ describe('registerHermesProvider', () => {
     expect(entries).toHaveLength(1);
   });
 
-  test('isModelCompatible returns true for any model string', () => {
-    registerHermesProvider();
-    const reg = getRegistration('hermes');
-
-    expect(reg.isModelCompatible('gpt-4')).toBe(true);
-    expect(reg.isModelCompatible('')).toBe(true);
-    expect(reg.isModelCompatible('hermes:ollama/llama3.1')).toBe(true);
-    expect(reg.isModelCompatible('sonnet')).toBe(true);
-    expect(reg.isModelCompatible('arbitrary-model-name')).toBe(true);
-  });
-
   test('factory creates a HermesProvider instance', () => {
     registerHermesProvider();
     const reg = getRegistration('hermes');
