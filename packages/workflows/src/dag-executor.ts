@@ -2863,6 +2863,11 @@ export async function executeDagWorkflow(
           const isFresh = isParallelLayer || node.context === 'fresh';
           const resumeSessionId = isFresh ? undefined : lastSequentialSessionId;
 
+          // Propagate freshSession flag so the provider skips pool.acquire.
+          const nodeOptionsWithFresh: SendQueryOptions | undefined = isFresh
+            ? { ...(nodeOptions ?? {}), freshSession: true }
+            : nodeOptions;
+
           // 6. Execute with retry for transient failures
           const retryConfig = getEffectiveNodeRetryConfig(node);
           let output: NodeExecutionResult = {
@@ -2880,7 +2885,7 @@ export async function executeDagWorkflow(
               workflowRun,
               node,
               provider,
-              nodeOptions,
+              nodeOptionsWithFresh,
               artifactsDir,
               logDir,
               baseBranch,

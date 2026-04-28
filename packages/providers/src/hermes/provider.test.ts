@@ -801,6 +801,58 @@ describe('HermesProvider', () => {
     pool.destroy();
   });
 
+  // ── freshSession flag ──────────────────────────────────────────────────
+
+  test('sendQuery skips pool when freshSession=true', async () => {
+    const mockAcp1 = createAcpMock();
+    const mockAcp2 = createAcpMock();
+
+    // First spawn returns mockAcp1, second spawn returns mockAcp2
+    mockSpawn
+      .mockImplementationOnce(() => mockAcp1.process)
+      .mockImplementationOnce(() => mockAcp2.process);
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — populates pool
+    (mockAcp1.process as any).exitCode = null;
+    await consume(provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' }));
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+    expect(pool.size).toBe(1);
+
+    // Second call with freshSession:true — must spawn a new process, bypassing pool
+    (mockAcp2.process as any).exitCode = null;
+    await consume(
+      provider.sendQuery('Fresh start', '/tmp', undefined, {
+        model: 'test-model',
+        freshSession: true,
+      })
+    );
+    expect(mockSpawn).toHaveBeenCalledTimes(2); // new spawn, not pool reuse
+
+    pool.destroy();
+  });
+
+  test('sendQuery uses pool normally when freshSession is absent', async () => {
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementation(() => mockAcp.process);
+    (mockAcp.process as any).exitCode = null;
+
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — populates pool
+    await consume(provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' }));
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+
+    // Second call without freshSession — should reuse pooled session
+    await consume(provider.sendQuery('Follow up', '/tmp', undefined, { model: 'test-model' }));
+    expect(mockSpawn).toHaveBeenCalledTimes(1); // no new spawn — pool reused
+
+    pool.destroy();
+  });
+
   // ── Temp HERMES_HOME cleanup on failure ─────────────────────────────────
 
   test('cleans up temp HERMES_HOME when query fails', async () => {

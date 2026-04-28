@@ -253,6 +253,9 @@ export interface SendQueryOptions extends AgentRequestOptions {
   nodeConfig?: NodeConfig;
   /** Per-provider defaults from .archon/config.yaml assistants section. */
   assistantConfig?: Record<string, unknown>;
+  /** When true, bypass the session pool and start a fresh session. Used by
+   *  dag-executor when node.context === 'fresh' or the node is in a parallel layer. */
+  freshSession?: boolean;
 }
 
 /**

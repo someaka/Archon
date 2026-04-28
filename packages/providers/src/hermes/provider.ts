@@ -240,7 +240,10 @@ export class HermesProvider implements IAgentProvider {
     const model = options?.model ?? config.model ?? 'default';
 
     // 3. Check session pool for an existing session (keyed by cwd + provider + model).
-    const pooled = this.pool.acquire(session.cwd, model, config.provider);
+    //    Skip pool lookup when freshSession is requested (context:fresh or parallel layer).
+    const pooled = options?.freshSession
+      ? undefined
+      : this.pool.acquire(session.cwd, model, config.provider);
     if (pooled?.client.isAlive()) {
       getLog().debug(
         { cwd: session.cwd, model, sessionId: pooled.sessionId },
