@@ -1,6 +1,4 @@
 name: archon-audit-to-pr
-
-model: kimi-k2.6
 provider: hermes
 
 description: |

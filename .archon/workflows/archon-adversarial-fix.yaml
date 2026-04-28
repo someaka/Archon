@@ -14,8 +14,6 @@ description: |
   adapted for remediation of existing code.
 
 provider: hermes
-model: kimi-k2.6
-
 nodes:
   # ═══════════════════════════════════════════════════════════════════
   # PHASE 1: PARSE AUDIT
