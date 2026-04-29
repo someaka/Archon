@@ -35,10 +35,13 @@ describe('resolveHermesBinary', () => {
     }
   });
 
-  test('returns undefined in dev mode (BUNDLED_IS_BINARY=false)', async () => {
+  test('returns undefined in dev mode when no hermes binary found (BUNDLED_IS_BINARY=false)', async () => {
     const resolver = await importResolver(false);
+    const spy = spyOn(resolver, 'fileExists').mockReturnValue(false);
+
     const result = await resolver.resolveHermesBinary();
     expect(result).toBeUndefined();
+    spy.mockRestore();
   });
 
   test('resolves from HERMES_BINARY_PATH env var when file exists', async () => {
