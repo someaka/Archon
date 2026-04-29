@@ -741,10 +741,21 @@ export async function* bridgeHermesSession(
     }
   }
 
-  // Fail loud: if a terminal error was emitted, throw so the provider's
-  // retry loop can classify and retry. Without this, errors are silently
-  // consumed as yielded result chunks and the retry mechanism never fires.
-  if (terminalErrorMessage && terminalClassification?.shouldRetry) {
+  // Fail loud: if a terminal RETRYABLE error was emitted, throw so the
+  // provider's retry loop can classify and retry. Non-retryable errors
+  // and timeouts are yielded as result chunks and the bridge returns
+  // normally — the provider treats this as a completed (failed) query.
+  //
+  // Timeout errors are excluded from retry: if the model took 5 minutes
+  // and timed out, retrying will almost certainly also timeout (4 × 300s
+  // = 20 min wasted). The underlying cause is not transient — it's
+  // either the model being too slow, rate limiting, or reasoning
+  // exhaustion. Same logic as first-event timeouts (shouldRetry=false).
+  if (
+    terminalErrorMessage &&
+    terminalClassification?.shouldRetry &&
+    terminalClassification.errorClass !== 'timeout'
+  ) {
     throw new HermesClassifiedError(terminalClassification);
   }
 }
