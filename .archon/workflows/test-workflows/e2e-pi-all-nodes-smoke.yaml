@@ -8,7 +8,7 @@
 name: e2e-pi-all-nodes-smoke
 description: 'Pi provider smoke across every CI-compatible node type.'
 provider: pi
-model: anthropic/claude-haiku-4-5
+model: opencode-go/kimi-k2.6
 
 nodes:
   # ─── AI node types ──────────────────────────────────────────────────────
