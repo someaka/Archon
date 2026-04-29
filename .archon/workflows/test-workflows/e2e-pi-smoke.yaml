@@ -10,7 +10,7 @@
 name: e2e-pi-smoke
 description: 'Smoke test for Pi community provider. Verifies prompt response via sendQuery.'
 provider: pi
-model: anthropic/claude-haiku-4-5
+model: opencode-go/kimi-k2.6
 
 nodes:
   # 1. Simple prompt — verifies Pi harness starts, AsyncQueue bridge yields
