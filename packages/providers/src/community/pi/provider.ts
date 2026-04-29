@@ -124,6 +124,8 @@ const PI_PROVIDER_ENV_VARS: Record<string, string> = {
   xai: 'XAI_API_KEY',
   openrouter: 'OPENROUTER_API_KEY',
   huggingface: 'HUGGINGFACE_API_KEY',
+  opencode: 'OPENCODE_API_KEY',
+  'opencode-go': 'OPENCODE_API_KEY',
 };
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
@@ -465,8 +467,18 @@ export class PiProvider implements IAgentProvider {
     // Required: without reload(), session.extensionRunner is undefined and
     // setFlagValue silently no-ops. createAgentSession skips this when a
     // custom resource loader is supplied.
+    // Catch errors from reload() — extension discovery can fail when the
+    // package directory is a minimal shim (e.g. Archon's ensurePiPackageDirShim).
+    // Extensions are optional; the session works without them.
     if (enableExtensions) {
-      await resourceLoader.reload();
+      try {
+        await resourceLoader.reload();
+      } catch (err: unknown) {
+        getLog().warn(
+          { err: err instanceof Error ? err.message : String(err) },
+          'pi.extensions_reload_failed'
+        );
+      }
     }
 
     getLog().info(

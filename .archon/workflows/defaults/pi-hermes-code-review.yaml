@@ -1,0 +1,20 @@
+name: pi-hermes-code-review
+description: |
+  Diagnostic workflow: uses Pi provider to review Hermes provider code.
+  If this works cleanly, the problem is in our Hermes integration, not Archon.
+
+nodes:
+  - id: review-hermes
+    prompt: |
+      Review the Hermes provider integration code at packages/providers/src/hermes/
+      for bugs, architectural issues, and correctness. Focus on:
+      1. event-bridge.ts — ACP lifecycle, handler cleanup, error propagation
+      2. provider.ts — sendQuery, retry logic, ConcurrencyLock usage
+      3. concurrency-lock.ts — async semaphore correctness
+      4. session-pool.ts — acquire/release, inUse flag, cleanup
+      5. acp-client.ts — child process management, dispose()
+
+      Be concise. List any bugs or architectural concerns found.
+    provider: pi
+    model: opencode-go/kimi-k2.6
+    enableExtensions: false

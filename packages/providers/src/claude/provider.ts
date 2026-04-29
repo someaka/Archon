@@ -591,6 +591,25 @@ function buildBaseClaudeOptions(
   const isJsExecutable = shouldPassNoEnvFile(cliPath);
   getLog().debug({ cliPath: cliPath ?? null, isJsExecutable }, 'claude.subprocess_env_file_flag');
 
+  // Model resolution priority:
+  // 1. requestOptions.model (from workflow YAML — explicit per-node override)
+  // 2. ANTHROPIC_MODEL env var (set by Ollama gateway or user shell)
+  // 3. assistantDefaults.model (from provider config)
+  const resolvedModel = requestOptions?.model ?? env.ANTHROPIC_MODEL ?? assistantDefaults.model;
+  if (resolvedModel) {
+    getLog().debug(
+      {
+        model: resolvedModel,
+        source: requestOptions?.model
+          ? 'workflow_yaml'
+          : env.ANTHROPIC_MODEL
+            ? 'env_ANTHROPIC_MODEL'
+            : 'assistant_config',
+      },
+      'claude.model_resolved'
+    );
+  }
+
   return {
     cwd,
     // In compiled binaries, the resolver supplies an absolute executable path;
@@ -598,7 +617,7 @@ function buildBaseClaudeOptions(
     ...(cliPath !== undefined ? { pathToClaudeCodeExecutable: cliPath } : {}),
     ...(isJsExecutable ? { executableArgs: ['--no-env-file'] } : {}),
     env,
-    model: requestOptions?.model ?? assistantDefaults.model,
+    model: resolvedModel,
     abortController: controller,
     ...(requestOptions?.outputFormat !== undefined
       ? { outputFormat: requestOptions.outputFormat }
