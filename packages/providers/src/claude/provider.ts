@@ -810,7 +810,9 @@ async function* streamClaudeMessages(
         ...(resultMsg.structured_output !== undefined
           ? { structuredOutput: resultMsg.structured_output }
           : {}),
-        ...(resultMsg.is_error ? { isError: true, errorSubtype: resultMsg.subtype } : {}),
+        ...(resultMsg.is_error && resultMsg.subtype !== 'success'
+          ? { isError: true, errorSubtype: resultMsg.subtype }
+          : {}),
         ...(resultMsg.is_error && sdkErrors?.length ? { errors: sdkErrors } : {}),
         ...(resultMsg.total_cost_usd !== undefined ? { cost: resultMsg.total_cost_usd } : {}),
         ...(resultMsg.stop_reason != null ? { stopReason: resultMsg.stop_reason } : {}),
