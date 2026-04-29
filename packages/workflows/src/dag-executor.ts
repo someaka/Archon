@@ -581,9 +581,11 @@ async function executeNodeInternal(
   nodeOutputs: Map<string, NodeOutput>,
   resumeSessionId: string | undefined,
   configuredCommandFolder?: string,
-  issueContext?: string
+  issueContext?: string,
+  onFirstOutput?: () => void
 ): Promise<NodeExecutionResult> {
   const nodeStartTime = Date.now();
+  let firstOutputSignaled = false;
   const nodeContext: SendMessageContext = { workflowId: workflowRun.id, nodeName: node.id };
 
   const configuredMcpNames = await loadConfiguredMcpServerNames(node.mcp, cwd);
@@ -700,6 +702,7 @@ async function executeNodeInternal(
     ...(shouldForkSession ? { forkSession: true } : {}),
   };
   let nodeIdleTimedOut = false;
+  let thinkingReceived = false;
   const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
   let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
 
@@ -761,6 +764,12 @@ async function executeNodeInternal(
       }
 
       if (msg.type === 'assistant' && msg.content) {
+        // Signal stagger gate: this node has started generating output.
+        // Unblocks the next parallel node in the layer.
+        if (!firstOutputSignaled && onFirstOutput) {
+          firstOutputSignaled = true;
+          onFirstOutput();
+        }
         nodeOutputText += msg.content; // ALWAYS capture for $node_id.output
         if (streamingMode === 'stream' || msg.flush) {
           // `flush` chunks (e.g. Pi notify() emitting a plannotator review URL)
@@ -780,6 +789,14 @@ async function executeNodeInternal(
           batchMessages.push(msg.content);
         }
         await logAssistant(logDir, workflowRun.id, msg.content);
+      } else if (msg.type === 'thinking' && msg.content) {
+        // Thinking output signals the model is active (stagger gate).
+        // Not accumulated into nodeOutputText — thinking is not user-facing.
+        thinkingReceived = true;
+        if (!firstOutputSignaled && onFirstOutput) {
+          firstOutputSignaled = true;
+          onFirstOutput();
+        }
       } else if (msg.type === 'tool' && msg.toolName) {
         const now = Date.now();
 
@@ -1123,7 +1140,12 @@ async function executeNodeInternal(
     // Idle-timeout exits are exempt: the timeout warning at line 1017 has
     // already told the user the node "completed via idle timeout"; flipping
     // that to a failure here would directly contradict the on-screen message.
-    if (nodeOutputText.trim() === '' && structuredOutput === undefined && !nodeIdleTimedOut) {
+    if (
+      nodeOutputText.trim() === '' &&
+      !thinkingReceived &&
+      structuredOutput === undefined &&
+      !nodeIdleTimedOut
+    ) {
       const duration = Date.now() - nodeStartTime;
       const emptyError = `Node '${node.id}' produced no assistant output. The provider stream closed without yielding content — likely a silent provider rejection or stream interruption.`;
       getLog().error({ nodeId: node.id, durationMs: duration }, 'dag.node_empty_output');
@@ -2551,16 +2573,50 @@ export async function executeDagWorkflow(
     }
 
     // Execute all nodes in the layer concurrently.
-    // Stagger parallel node starts to avoid overwhelming the provider with
-    // simultaneous API calls (xiaomi silently rate-limits by queuing).
-    const STAGGER_DELAY_MS = 10_000;
+    // For parallel layers, stagger starts: each node waits for the previous
+    // node's first output before firing. This avoids overwhelming the provider
+    // with simultaneous API calls (xiaomi silently rate-limits by queuing).
+    // Non-AI nodes (bash, script) signal immediately; AI nodes signal on
+    // first assistant chunk.
+    const staggerGates: Promise<void>[] = [];
+    const staggerResolvers: (() => void)[] = [];
+    if (isParallelLayer && layer.length > 1) {
+      for (let i = 0; i < layer.length; i++) {
+        if (i === 0) {
+          staggerGates.push(Promise.resolve()); // node 0 starts immediately
+        } else {
+          let resolve!: () => void;
+          staggerGates.push(
+            new Promise<void>(r => {
+              resolve = r;
+            })
+          );
+          staggerResolvers.push(resolve);
+        }
+      }
+    }
+
+    // Safety timeout: if a node errors before signaling, don't block forever
+    const STAGGER_TIMEOUT_MS = 60_000;
+
     const layerResults = await Promise.allSettled(
       layer.map(async (node, nodeIdx): Promise<{ nodeId: string; output: NodeExecutionResult }> => {
         try {
-          // Stagger: wait for previous nodes to start before this one fires
+          // Stagger: wait for previous node's first output before starting
           if (isParallelLayer && nodeIdx > 0) {
-            await new Promise(r => setTimeout(r, STAGGER_DELAY_MS * nodeIdx));
+            await Promise.race([
+              staggerGates[nodeIdx],
+              new Promise<void>(r => setTimeout(r, STAGGER_TIMEOUT_MS)),
+            ]);
           }
+
+          // Helper to signal next node that this one has started generating
+          const signalNodeReady: (() => void) | undefined =
+            isParallelLayer && nodeIdx < layer.length - 1
+              ? (): void => {
+                  staggerResolvers[nodeIdx]?.();
+                }
+              : undefined;
           // 0. Skip if this node completed successfully in a prior run (resume path)
           if (priorCompletedNodes?.has(node.id)) {
             getLog().info({ nodeId: node.id }, 'dag.node_skipped_prior_success');
@@ -2591,6 +2647,7 @@ export async function executeDagWorkflow(
               reason: 'prior_success',
             });
             // Return the pre-populated output (already in nodeOutputs)
+            signalNodeReady?.();
             return {
               nodeId: node.id,
               output: nodeOutputs.get(node.id) ?? { state: 'skipped' as const, output: '' },
@@ -2627,6 +2684,7 @@ export async function executeDagWorkflow(
               nodeName: node.command ?? node.id,
               reason: 'trigger_rule',
             });
+            signalNodeReady?.();
             return { nodeId: node.id, output: { state: 'skipped' as const, output: '' } };
           }
 
@@ -2675,6 +2733,7 @@ export async function executeDagWorkflow(
                 nodeName: node.command ?? node.id,
                 reason: 'when_condition_parse_error',
               });
+              signalNodeReady?.();
               return { nodeId: node.id, output: { state: 'skipped' as const, output: '' } };
             }
             if (!conditionPasses) {
@@ -2705,6 +2764,7 @@ export async function executeDagWorkflow(
                 nodeName: node.command ?? node.id,
                 reason: 'when_condition',
               });
+              signalNodeReady?.();
               return {
                 nodeId: node.id,
                 output: { state: 'skipped' as const, output: '' },
@@ -2714,6 +2774,7 @@ export async function executeDagWorkflow(
 
           // 3. Bash node dispatch — no AI, no session
           if (isBashNode(node)) {
+            signalNodeReady?.();
             const output = await executeBashNode(
               deps,
               platform,
@@ -2734,6 +2795,7 @@ export async function executeDagWorkflow(
 
           // 3b. Loop node dispatch — manages its own AI sessions and iteration
           if (isLoopNode(node)) {
+            signalNodeReady?.();
             // Resolve per-node provider/model overrides (same logic as other node types).
             // Provider is explicit; model passes through to the SDK. Throw on an
             // unknown provider so the outer catch below emits the standard
@@ -2777,6 +2839,7 @@ export async function executeDagWorkflow(
 
           // 3c. Approval node dispatch — pauses workflow for human review
           if (isApprovalNode(node)) {
+            signalNodeReady?.();
             const output = await executeApprovalNode(
               node,
               workflowRun,
@@ -2801,6 +2864,7 @@ export async function executeDagWorkflow(
 
           // 3d. Cancel node dispatch — terminates the workflow run
           if (isCancelNode(node)) {
+            signalNodeReady?.();
             const reason = substituteNodeOutputRefs(node.cancel, nodeOutputs);
             const cancelMsg = `\u274c **Workflow cancelled** (node \`${node.id}\`): ${reason}`;
             await safeSendMessage(platform, conversationId, cancelMsg, {
@@ -2902,7 +2966,8 @@ export async function executeDagWorkflow(
               // ensures the source is never mutated, so retries can safely resume from it.
               resumeSessionId,
               configuredCommandFolder,
-              issueContext
+              issueContext,
+              signalNodeReady
             );
 
             if (output.state !== 'failed') break;
