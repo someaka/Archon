@@ -2550,10 +2550,17 @@ export async function executeDagWorkflow(
       lastSequentialSessionId = undefined; // reset — parallel nodes can't share sessions
     }
 
-    // Execute all nodes in the layer concurrently
+    // Execute all nodes in the layer concurrently.
+    // Stagger parallel node starts to avoid overwhelming the provider with
+    // simultaneous API calls (xiaomi silently rate-limits by queuing).
+    const STAGGER_DELAY_MS = 10_000;
     const layerResults = await Promise.allSettled(
-      layer.map(async (node): Promise<{ nodeId: string; output: NodeExecutionResult }> => {
+      layer.map(async (node, nodeIdx): Promise<{ nodeId: string; output: NodeExecutionResult }> => {
         try {
+          // Stagger: wait for previous nodes to start before this one fires
+          if (isParallelLayer && nodeIdx > 0) {
+            await new Promise(r => setTimeout(r, STAGGER_DELAY_MS * nodeIdx));
+          }
           // 0. Skip if this node completed successfully in a prior run (resume path)
           if (priorCompletedNodes?.has(node.id)) {
             getLog().info({ nodeId: node.id }, 'dag.node_skipped_prior_success');
