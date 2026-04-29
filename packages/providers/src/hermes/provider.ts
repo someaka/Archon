@@ -19,7 +19,7 @@ import { withFirstEventTimeout } from './timeout-utils';
 import { readHermesMcpConfig } from './hermes-mcp-reader';
 import { HermesSessionPool } from './session-pool';
 import { ConcurrencyLock } from './concurrency-lock';
-import { classifyHermesError } from './error-classifier';
+import { classifyHermesError, HermesClassifiedError } from './error-classifier';
 
 /** Lazy-initialized logger (deferred so test mocks can intercept createLogger) */
 const getLog = createLazyLogger('provider.hermes');
@@ -200,7 +200,10 @@ export class HermesProvider implements IAgentProvider {
           return;
         } catch (err) {
           const error = err instanceof Error ? err : new Error(String(err));
-          const classified = classifyHermesError(error.message);
+          const classified =
+            error instanceof HermesClassifiedError
+              ? error.classification
+              : classifyHermesError(error.message);
           if (!classified.shouldRetry || attempt >= MAX_SUBPROCESS_RETRIES) throw error;
           const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
           getLog().info({ attempt, delayMs }, 'hermes.retrying_query');

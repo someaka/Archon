@@ -19,7 +19,11 @@ import {
 } from './acp-protocol';
 import { createLazyLogger } from '../utils/lazy-logger';
 import { BUNDLED_VERSION } from '@archon/paths';
-import { classifyHermesError } from './error-classifier';
+import {
+  classifyHermesError,
+  HermesClassifiedError,
+  type ClassifiedError,
+} from './error-classifier';
 
 const getLog = createLazyLogger('provider.hermes.event-bridge');
 
@@ -156,6 +160,8 @@ export async function* bridgeHermesSession(
   // Track whether we've already emitted a terminal result chunk so we don't
   // emit duplicates (e.g. error event + non-zero exit both firing).
   let terminalEmitted = false;
+  let terminalErrorMessage: string | undefined;
+  let terminalClassification: ClassifiedError | undefined;
 
   let sessionId: string | undefined;
   const MAX_STDERR_LINES = 50;
@@ -312,9 +318,16 @@ export async function* bridgeHermesSession(
   }
 
   /** Emit a terminal result chunk exactly once, regardless of which handler fires first. */
-  function emitTerminal(chunk: Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk']): void {
+  function emitTerminal(
+    chunk: Extract<BridgeQueueItem, { kind: 'chunk' }>['chunk'],
+    classification?: ClassifiedError
+  ): void {
     if (terminalEmitted) return;
     terminalEmitted = true;
+    if (chunk.type === 'result' && chunk.isError) {
+      terminalErrorMessage = chunk.errors?.[0] ?? 'Hermes query failed';
+      terminalClassification = classification;
+    }
     queue.push({ kind: 'chunk', chunk });
   }
 
@@ -323,7 +336,7 @@ export async function* bridgeHermesSession(
     baseMessage: string,
     stderrLines: string[],
     context?: { exitCode?: number | null; jsonRpcCode?: number }
-  ): { errors: string[]; errorSubtype: string } {
+  ): { errors: string[]; errorSubtype: string; classified: ClassifiedError } {
     const errors = [baseMessage];
     if (stderrLines.length > 0) {
       errors.push(`stderr: ${redactSecrets(stderrLines[stderrLines.length - 1]).slice(0, 200)}`);
@@ -333,7 +346,7 @@ export async function* bridgeHermesSession(
       exitCode: context?.exitCode ?? null,
       jsonRpcCode: context?.jsonRpcCode,
     });
-    return { errors, errorSubtype: classified.errorClass };
+    return { errors, errorSubtype: classified.errorClass, classified };
   }
 
   // ── process exit handling ──────────────────────────────────────────────
@@ -344,20 +357,20 @@ export async function* bridgeHermesSession(
     if (code !== 0 && code !== null) {
       getLog().warn({ code, signal }, 'hermes.bridge.process_exited_nonzero');
       rejectPending(`Hermes ACP exited with code ${code}`);
-      const { errors, errorSubtype } = buildTerminalError(
+      const { errors, errorSubtype, classified } = buildTerminalError(
         `Hermes ACP exited with code ${code}`,
         stderrLines,
         { exitCode: code }
       );
-      emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
     } else if (signal !== null) {
       getLog().warn({ signal }, 'hermes.bridge.process_terminated_by_signal');
       rejectPending(`Hermes ACP terminated by signal ${signal}`);
-      const { errors, errorSubtype } = buildTerminalError(
+      const { errors, errorSubtype, classified } = buildTerminalError(
         `Hermes ACP terminated by signal ${signal}`,
         stderrLines
       );
-      emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+      emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
     } else {
       // Clean exit (code 0 or null) — reject any pending request to avoid 30s timeout
       rejectPending('Hermes ACP process exited unexpectedly');
@@ -382,9 +395,9 @@ export async function* bridgeHermesSession(
   const errorHandler = (error: Error): void => {
     getLog().error({ err: error }, 'hermes.bridge.process_error');
     const baseMessage = `Failed to run Hermes ACP: ${error.message}`;
-    const { errors, errorSubtype } = buildTerminalError(baseMessage, stderrLines);
+    const { errors, errorSubtype, classified } = buildTerminalError(baseMessage, stderrLines);
     rejectPending(baseMessage);
-    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
     queue.push({ kind: 'done' });
   };
   childProcess.on('error', errorHandler);
@@ -422,9 +435,12 @@ export async function* bridgeHermesSession(
         // Process already killed or exited — expected, no-op
       }
     }, 5000);
-    const { errors, errorSubtype } = buildTerminalError('Query was aborted', stderrLines);
+    const { errors, errorSubtype, classified } = buildTerminalError(
+      'Query was aborted',
+      stderrLines
+    );
     rejectPending('Query was aborted');
-    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
     queue.close();
   };
 
@@ -499,7 +515,13 @@ export async function* bridgeHermesSession(
       const initResp = await sendRequest(initReq);
       if ('error' in initResp) {
         const err = assertJsonRpcError(initResp.error);
-        throw new Error(`ACP initialize failed: ${err.message} (code ${err.code})`);
+        const wrapped = new Error(
+          `ACP initialize failed: ${err.message} (code ${err.code})`
+        ) as Error & {
+          __jsonRpcCode?: number;
+        };
+        wrapped.__jsonRpcCode = err.code;
+        throw wrapped;
       }
       if (
         'result' in initResp &&
@@ -555,7 +577,13 @@ export async function* bridgeHermesSession(
       const sessionResp = await sendRequest(sessionReq);
       if ('error' in sessionResp) {
         const err = assertJsonRpcError(sessionResp.error);
-        throw new Error(`ACP session/new failed: ${err.message} (code ${err.code})`);
+        const wrapped = new Error(
+          `ACP session/new failed: ${err.message} (code ${err.code})`
+        ) as Error & {
+          __jsonRpcCode?: number;
+        };
+        wrapped.__jsonRpcCode = err.code;
+        throw wrapped;
       }
       if ('result' in sessionResp) {
         const result = assertObjectResult(sessionResp.result);
@@ -601,7 +629,13 @@ export async function* bridgeHermesSession(
         const promptResp = await sendRequest(promptReq, PROMPT_TIMEOUT_MS);
         if ('error' in promptResp) {
           const err = assertJsonRpcError(promptResp.error);
-          throw new Error(`ACP session/prompt failed: ${err.message} (code ${err.code})`);
+          const wrapped = new Error(
+            `ACP session/prompt failed: ${err.message} (code ${err.code})`
+          ) as Error & {
+            __jsonRpcCode?: number;
+          };
+          wrapped.__jsonRpcCode = err.code;
+          throw wrapped;
         }
         // 4. Emit terminal result
         const result = 'result' in promptResp ? assertObjectResult(promptResp.result) : undefined;
@@ -638,8 +672,14 @@ export async function* bridgeHermesSession(
       } catch (err) {
         getLog().error({ err }, 'hermes.bridge.acp_request_failed');
         const errorMessage = err instanceof Error ? err.message : String(err);
-        const { errors, errorSubtype } = buildTerminalError(errorMessage, stderrLines);
-        emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+        const jsonRpcCode = (err as (Error & { __jsonRpcCode?: number }) | undefined)
+          ?.__jsonRpcCode;
+        const { errors, errorSubtype, classified } = buildTerminalError(
+          errorMessage,
+          stderrLines,
+          jsonRpcCode != null ? { jsonRpcCode } : undefined
+        );
+        emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
         queue.push({ kind: 'done' });
       }
     };
@@ -650,8 +690,13 @@ export async function* bridgeHermesSession(
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
     const errorMessage = err instanceof Error ? err.message : String(err);
-    const { errors, errorSubtype } = buildTerminalError(errorMessage, stderrLines);
-    emitTerminal({ type: 'result', isError: true, errors, errorSubtype });
+    const jsonRpcCode = (err as (Error & { __jsonRpcCode?: number }) | undefined)?.__jsonRpcCode;
+    const { errors, errorSubtype, classified } = buildTerminalError(
+      errorMessage,
+      stderrLines,
+      jsonRpcCode != null ? { jsonRpcCode } : undefined
+    );
+    emitTerminal({ type: 'result', isError: true, errors, errorSubtype }, classified);
     queue.push({ kind: 'done' });
   }
 
@@ -663,7 +708,7 @@ export async function* bridgeHermesSession(
   // measures actual time-to-first-chunk, not total prompt completion time.
   try {
     for await (const item of queue) {
-      if (item.kind === 'done') return;
+      if (item.kind === 'done') break;
       if (item.kind === 'error') throw item.error;
       yield item.chunk;
     }
@@ -694,5 +739,12 @@ export async function* bridgeHermesSession(
         // Process may already be gone — this is defensive.
       }
     }
+  }
+
+  // Fail loud: if a terminal error was emitted, throw so the provider's
+  // retry loop can classify and retry. Without this, errors are silently
+  // consumed as yielded result chunks and the retry mechanism never fires.
+  if (terminalErrorMessage && terminalClassification?.shouldRetry) {
+    throw new HermesClassifiedError(terminalClassification);
   }
 }

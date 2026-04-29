@@ -1,5 +1,6 @@
 export type HermesErrorClass =
   | 'rate_limit'
+  | 'timeout'
   | 'auth'
   | 'permission'
   | 'crash'
@@ -12,13 +13,23 @@ export interface ClassifiedError {
   enrichedMessage: string;
 }
 
+export class HermesClassifiedError extends Error {
+  public readonly classification: ClassifiedError;
+  constructor(classification: ClassifiedError) {
+    super(classification.enrichedMessage);
+    this.name = 'HermesClassifiedError';
+    this.classification = classification;
+  }
+}
+
 /**
  * Classify a Hermes subprocess error based on the error message, stderr output,
  * and process exit code.
  *
  * Rules (applied in order):
  *  1. protocol      — JSON-RPC error codes (takes precedence)
- *  2. rate_limit    — message/stderr includes "rate limit", "429", "timed out", "timeout"
+ *  2. timeout       — message/stderr includes "timed out", "timeout" (retryable)
+ *  3. rate_limit    — message/stderr includes "rate limit", "429" (retryable)
  *  3. auth          — message/stderr includes "unauthorized", "invalid api key"
  *  4. permission    — message/stderr includes "eacces", "enoent", "enotdir"
  *  5. crash         — non-zero exit code OR message/stderr includes "panic"
@@ -81,6 +92,12 @@ export function classifyHermesError(
         enrichedMessage: `Hermes agent error (code ${code}): ${message}`,
       };
     }
+    // Unrecognized JSON-RPC code — treat as protocol error (non-retryable)
+    return {
+      errorClass: 'protocol',
+      shouldRetry: false,
+      enrichedMessage: `Hermes protocol error (code ${code}): ${message}`,
+    };
   }
 
   // First-event timeout (subprocess hang) → NOT retryable
@@ -93,17 +110,21 @@ export function classifyHermesError(
     };
   }
 
-  // Rate limit / timeout → retryable
-  if (
-    combined.includes('rate limit') ||
-    combined.includes('429') ||
-    combined.includes('timed out') ||
-    combined.includes('timeout')
-  ) {
+  // Timeout (subprocess hang or request timeout) → retryable
+  if (combined.includes('timed out') || combined.includes('timeout')) {
+    return {
+      errorClass: 'timeout',
+      shouldRetry: true,
+      enrichedMessage: `Timeout detected: ${message}`,
+    };
+  }
+
+  // Rate limit → retryable
+  if (combined.includes('rate limit') || combined.includes('429')) {
     return {
       errorClass: 'rate_limit',
       shouldRetry: true,
-      enrichedMessage: `Rate limit or timeout detected: ${message}`,
+      enrichedMessage: `Rate limit detected: ${message}`,
     };
   }
 

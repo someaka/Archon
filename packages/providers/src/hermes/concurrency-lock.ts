@@ -1,6 +1,6 @@
 /**
  * Async semaphore that serializes concurrent operations.
- * Used to prevent multiple hermes acp processes from contending on state.db.
+ * Used to prevent multiple hermes acp processes from contending on the same API.
  * Default maxConcurrency=3. Tunable via ARCHON_HERMES_MAX_CONCURRENCY env var.
  */
 export class ConcurrencyLock {

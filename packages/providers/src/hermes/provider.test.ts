@@ -1260,15 +1260,20 @@ describe('HermesProvider', () => {
     expect(promptCount).toBe(1);
     expect(pool.size).toBe(1);
 
-    // Second call — reuses pooled session, mock returns error
-    const { chunks: chunks2 } = await consume(
+    // Second call — reuses pooled session, mock returns JSON-RPC error.
+    // Bridge classifies code -1 as protocol/non-retryable, emits error result
+    // chunk, and returns normally (no throw). Provider sees normal completion.
+    const { chunks: chunks2, error: error2 } = await consume(
       provider.sendQuery('Follow up', '/tmp', undefined, {
         model: 'test-model',
       })
     );
+    // No error thrown — protocol errors are non-retryable, bridge handles internally
+    expect(error2).toBeUndefined();
+    // Exactly 2 prompts (1 success + 1 failure, no retries)
     expect(promptCount).toBe(2);
 
-    // Error result chunk emitted with isError: true
+    // Error result chunk is still emitted (bridge yields it before returning)
     const resultChunks = chunks2.filter(
       (c): c is { type: 'result'; isError?: boolean; errors?: string[] } =>
         typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
@@ -1278,11 +1283,8 @@ describe('HermesProvider', () => {
     expect(resultChunks[0].errors).toBeDefined();
     expect(resultChunks[0].errors?.[0]).toContain('prompt failure');
 
-    // Pool entry persists — the bridge handles the error internally (emits
-    // terminal error result via emitTerminal + done). No exception propagates
-    // to the provider's catch block, so the pool entry is NOT evicted. The
-    // pooled process remains alive (keepAlive: true). The stale entry will be
-    // detected and evicted on the NEXT query if the process has exited.
+    // Pool entry is released (not evicted) — the bridge handled the error
+    // internally without throwing, so the provider's catch block didn't fire.
     expect(pool.size).toBe(1);
 
     pool.destroy();
@@ -1400,9 +1402,9 @@ describe('retry behavior', () => {
     expect(rateLimit.errorClass).toBe('rate_limit');
     expect(rateLimit.shouldRetry).toBe(true);
 
-    // Timeout → classified as rate_limit, shouldRetry true
+    // Timeout → classified as timeout, shouldRetry true
     const timeout = classifyHermesError('request timed out', [], 0);
-    expect(timeout.errorClass).toBe('rate_limit');
+    expect(timeout.errorClass).toBe('timeout');
     expect(timeout.shouldRetry).toBe(true);
 
     // Unknown errors → shouldRetry true (Hermes retries unknown errors)
@@ -1412,7 +1414,9 @@ describe('retry behavior', () => {
   });
 
   test('enriched error includes errorSubtype on process crash', async () => {
-    mockSpawn.mockImplementationOnce(() => {
+    // Use mockImplementation (not mockImplementationOnce) so retry attempts
+    // also get a fresh mock that exits with code 1.
+    mockSpawn.mockImplementation(() => {
       const mockAcp = createAcpMock();
       // Emit non-zero exit to trigger crash classification
       queueMicrotask(() => {
@@ -1421,8 +1425,14 @@ describe('retry behavior', () => {
       return mockAcp.process;
     });
 
-    const { chunks } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
+    // Bridge now throws after yielding error result, triggering the retry loop.
+    // After MAX_SUBPROCESS_RETRIES+1 attempts, sendQuery throws the final error.
+    const { chunks, error } = await consume(new HermesProvider().sendQuery('Hello', '/tmp'));
 
+    // Error is thrown after retries are exhausted
+    expect(error).toBeDefined();
+
+    // Error result chunk is still yielded (before the throw) on each attempt
     const resultChunks = chunks.filter(
       (c): c is { type: 'result'; isError?: boolean; errorSubtype?: string; errors?: string[] } =>
         typeof c === 'object' && c !== null && (c as { type?: string }).type === 'result'
@@ -1437,7 +1447,7 @@ describe('retry behavior', () => {
     expect(resultChunks[0].errors).toBeDefined();
     expect(resultChunks[0].errors!.length).toBeGreaterThanOrEqual(1);
     expect(resultChunks[0].errors![0]).toContain('exited with code 1');
-  });
+  }, 30000);
 
   test('abort signal during query throws via retry loop', async () => {
     const controller = new AbortController();

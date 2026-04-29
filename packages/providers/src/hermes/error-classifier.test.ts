@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { classifyHermesError } from './error-classifier';
+import { HermesClassifiedError } from './error-classifier';
 import type { ClassifiedError } from './error-classifier';
 
 describe('classifyHermesError', () => {
@@ -23,13 +24,13 @@ describe('classifyHermesError', () => {
     expect(shouldRetry).toBe(true);
   });
 
-  test('classifies timeout as rate limit', () => {
+  test('classifies timeout as timeout (not rate_limit)', () => {
     const { errorClass, shouldRetry }: ClassifiedError = classifyHermesError(
       'request timed out',
       [],
       0
     );
-    expect(errorClass).toBe('rate_limit');
+    expect(errorClass).toBe('timeout');
     expect(shouldRetry).toBe(true);
   });
 
@@ -152,11 +153,11 @@ describe('classifyHermesError', () => {
     expect(result.shouldRetry).toBe(false);
   });
 
-  test('classifies unrecognized JSON-RPC code as unknown', () => {
-    // Unrecognized JSON-RPC codes fall through to 'unknown' with shouldRetry true.
+  test('classifies unrecognized JSON-RPC code as protocol (non-retryable)', () => {
+    // Unrecognized JSON-RPC codes fall through to 'protocol' with shouldRetry false.
     const result = classifyHermesError('fail', { jsonRpcCode: -99999 });
-    expect(result.errorClass).toBe('unknown');
-    expect(result.shouldRetry).toBe(true);
+    expect(result.errorClass).toBe('protocol');
+    expect(result.shouldRetry).toBe(false);
   });
 
   test('enrichedMessage contains JSON-RPC code', () => {
@@ -194,5 +195,35 @@ describe('classifyHermesError', () => {
     );
     expect(errorClass).toBe('crash');
     expect(shouldRetry).toBe(true);
+  });
+});
+
+describe('HermesClassifiedError', () => {
+  test('carries classification metadata', () => {
+    const classification: ClassifiedError = {
+      errorClass: 'crash',
+      shouldRetry: true,
+      enrichedMessage: 'test crash',
+    };
+    const err = new HermesClassifiedError(classification);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(HermesClassifiedError);
+    expect(err.name).toBe('HermesClassifiedError');
+    expect(err.message).toBe('test crash');
+    expect(err.classification).toEqual(classification);
+  });
+  test('is throwable and catchable as Error', () => {
+    const classification: ClassifiedError = {
+      errorClass: 'protocol',
+      shouldRetry: false,
+      enrichedMessage: 'protocol error',
+    };
+    const err = new HermesClassifiedError(classification);
+    expect(() => {
+      throw err;
+    }).toThrow(Error);
+    expect(() => {
+      throw err;
+    }).toThrow('protocol error');
   });
 });
