@@ -12,7 +12,9 @@
  * 4. Throw with install instructions (or return undefined)
  *
  * In dev mode (BUNDLED_IS_BINARY=false), returns undefined so callers fall
- * back to normal node_modules / PATH resolution.
+ * back to normal node_modules / PATH resolution. Vendor paths are skipped in
+ * dev mode (no bundled binary), but env var, config, and autodetect checks
+ * still run so that user-installed binaries are found.
  */
 import { existsSync as _existsSync } from 'node:fs';
 import { BUNDLED_IS_BINARY, createLogger } from '@archon/paths';
@@ -67,15 +69,15 @@ export interface ResolveBinaryPathOptions {
 /**
  * Resolve a provider binary path using the standard pipeline.
  *
- * In dev mode: returns undefined immediately.
- * In binary mode: checks env → config → autodetect, then either throws or
- * returns undefined based on `throwOnMiss`.
+ * Always checks: env → config → autodetect, then either throws or returns
+ * undefined based on `throwOnMiss`.
+ *
+ * In dev mode (BUNDLED_IS_BINARY=false): vendor paths are skipped (no bundled
+ * binary), but env, config, and autodetect resolution still runs.
  */
 export async function resolveBinaryPath(
   options: ResolveBinaryPathOptions
 ): Promise<string | undefined> {
-  if (!BUNDLED_IS_BINARY) return undefined;
-
   const {
     envVar,
     configPath,
@@ -123,10 +125,12 @@ export async function resolveBinaryPath(
   }
 
   // 3. Vendor paths (user-placed binary)
-  for (const probePath of vendorPaths) {
-    if (checkFileExists(probePath)) {
-      log.info({ binaryPath: probePath, source: 'vendor' }, logEvent);
-      return probePath;
+  if (BUNDLED_IS_BINARY) {
+    for (const probePath of vendorPaths) {
+      if (checkFileExists(probePath)) {
+        log.info({ binaryPath: probePath, source: 'vendor' }, logEvent);
+        return probePath;
+      }
     }
   }
 
