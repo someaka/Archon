@@ -14,8 +14,8 @@
 
 | ID       | Issue                                                                       | Status  | Assigned   |
 | -------- | --------------------------------------------------------------------------- | ------- | ---------- |
-| CLAUDE-1 | Claude provider bypasses Ollama gateway — auth fails                        | OPEN    | Debugger A |
-| CLAUDE-2 | e2e-claude-smoke uses `model: haiku` instead of `deepseek-v3-pro:cloud`     | OPEN    | Debugger A |
+| CLAUDE-1 | Claude provider bypasses Ollama gateway — auth fails                        | BLOCKED | Debugger A |
+| CLAUDE-2 | e2e-claude-smoke uses `model: haiku` instead of `deepseek-v4-pro:cloud`     | DONE    | Debugger A |
 | PI-1     | e2e-pi-smoke uses `anthropic/claude-haiku-4-5` — wrong model for this setup | DONE    | Debugger B |
 | PI-2     | Pi auth.json empty — needs API key for the correct provider                 | DONE    | Debugger B |
 | VERIFY   | Re-run all 3 e2e smoke tests after fixes                                    | PENDING | Debugger C |
@@ -53,30 +53,70 @@ Reading files:
 - `packages/providers/src/claude/provider.ts` — how CLI is spawned
 - `packages/providers/src/claude/config.ts` — config options
 - `packages/providers/src/claude/options-translator.ts` — CLI args
-- `~/.claude/settings.json` — user's actual config
-- `~/.ollama/config.json` — Ollama integration config
+- `~/.claude/settings.json` — user's actual config (`model: deepseek-v4-pro:cloud`)
+- `~/.ollama/config.json` — Ollama integration config (`claude.models: ["deepseek-v4-pro:cloud"]`)
+- `~/.claude.json` — Claude Code state (`additionalModelOptionsCache: []`)
 
-**Finding 1:** The Claude provider spawns the CLI via `@anthropic-ai/claude-agent-sdk` `query()`. The SDK accepts `Options.model` and passes it as `--model` to the CLI binary. No Ollama gateway routing.
+**Finding 1:** The Claude provider spawns the CLI via `@anthropic-ai/claude-agent-sdk` `query()`. The SDK accepts `Options.model` and passes it as `--model` to the CLI binary.
 
-**Finding 2:** When `ollama launch claude` is used, Ollama sets env vars (`ANTHROPIC_MODEL`, `ANTHROPIC_AUTH_TOKEN=ollama`) and launches the CLI. The CLI reads these and routes through Ollama's gateway. When Archon spawns directly, these env vars are NOT set.
+**Finding 2:** Ollama v0.20.6 runs an Anthropic-compatible gateway at `http://localhost:11434/v1/messages`. Verified: `curl -s http://localhost:11434/v1/messages` with `deepseek-v4-pro:cloud` model returns valid responses.
 
-**Finding 3:** The fix needs to either:
+**Finding 3:** The Claude Code binary (v2.1.123) **validates model names against its internal known model list** before making any API call. `deepseek-v4-pro:cloud` is rejected with "There's an issue with the selected model. It may not exist or you may not have access to it." This validation cannot be bypassed via:
 
-- (a) Set `ANTHROPIC_MODEL` and `ANTHROPIC_AUTH_TOKEN` env vars before spawning, OR
-- (b) Pass `model: deepseek-v3-pro:cloud` via the workflow YAML, OR
-- (c) Read `~/.claude/settings.json` to pick up the user's model config
+- `--model` CLI flag ❌
+- `ANTHROPIC_MODEL` env var ❌
+- `ANTHROPIC_BASE_URL` + `ANTHROPIC_AUTH_TOKEN` env vars ❌
+- `--settings` with `model_providers`, `availableModels`, `additionalModelOptionsCache` ❌
+- `--bare` mode ❌
+
+**Finding 4:** When `ollama launch claude --model deepseek-v4-pro:cloud` works, Ollama must use a mechanism not available through the SDK — likely modifying `~/.claude.json` `additionalModelOptionsCache` before spawning the binary. Strace shows Ollama does NOT write to settings files before launching Claude.
+
+**Finding 5:** The `~/.claude.json` file has `"additionalModelOptionsCache": []` — this is where Ollama likely registers custom models. The provider cannot safely modify this file (it's the user's personal Claude Code state).
 
 ### Fix
 
-**Status:** IN_PROGRESS
+**Status:** PARTIALLY_DONE — provider improvements made, but BLOCKED by Claude Code binary model validation
 
-<!-- Debugger A: write your fix details here -->
+**Changes made (3 commits):**
+
+1. **`c3589977`** — `e2e-claude-smoke.yaml`: `model: haiku` → `model: deepseek-v4-pro:cloud`
+2. **`e60a0f6f`** — Added `detectAndConfigureOllamaGateway()`: probes `localhost:11434`, sets `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` env vars
+3. **`b778b01c`** — Added `ANTHROPIC_MODEL` env var fallback in model resolution; skip `--model` flag for Ollama gateway (pass via env var instead)
+
+**Provider model resolution now works as:**
+
+1. `requestOptions.model` (workflow YAML) — highest priority
+2. `ANTHROPIC_MODEL` env var (Ollama gateway or user shell)
+3. `assistantDefaults.model` (provider config)
+
+**Ollama gateway auto-detection:**
+
+- Checks if `ANTHROPIC_BASE_URL` is not already set
+- Checks if `ANTHROPIC_MODEL` has `:` in name (Ollama naming convention)
+- Probes `http://localhost:11434/api/version` with 2s timeout
+- If detected, sets `ANTHROPIC_BASE_URL=http://localhost:11434/v1` and `ANTHROPIC_AUTH_TOKEN=ollama`
 
 ### Verification
 
-**Status:** PENDING
+**Status:** BLOCKED
 
-<!-- Debugger A: write verification results here after fix -->
+**Command:** `bun run cli workflow run e2e-claude-smoke --no-worktree`
+
+**Results:**
+
+- Ollama gateway detected: ✅ (`claude.ollama_gateway_detected` log)
+- Model set via env: ✅ (`claude.model_set_via_env_for_ollama` log)
+- Model validation: ❌ Claude Code binary rejects `deepseek-v4-pro:cloud`
+- Error: "There's an issue with the selected model (deepseek-v4-pro:cloud). It may not exist or you may not have access to it."
+
+**Root cause:** Claude Code binary v2.1.123 has internal model validation that rejects non-Anthropic model names. The `ollama launch claude` command uses a mechanism not available through the SDK (likely writing to `~/.claude.json` `additionalModelOptionsCache`).
+
+**Recommended next steps:**
+
+1. Investigate how Ollama populates `additionalModelOptionsCache` in `~/.claude.json`
+2. OR: Add provider-level `~/.claude.json` model registration (with backup/restore)
+3. OR: Use Claude SDK's `managedSettings` option to register models
+4. OR: Report to Anthropic that the SDK should support custom model providers
 
 ---
 
