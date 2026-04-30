@@ -1524,8 +1524,9 @@ describe('PiProvider', () => {
         })
       );
 
-      expect(process.env.PI_TEST_ONE).toBe('one');
-      expect(process.env.PI_TEST_TWO).toBe('two');
+      // After sendQuery, the env cleanup in the finally block removes injected keys
+      expect(process.env.PI_TEST_ONE).toBeUndefined();
+      expect(process.env.PI_TEST_TWO).toBeUndefined();
     } finally {
       delete process.env.PI_TEST_ONE;
       delete process.env.PI_TEST_TWO;
