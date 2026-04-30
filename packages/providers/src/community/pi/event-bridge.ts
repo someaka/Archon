@@ -53,7 +53,15 @@ function isAssistantMessage(m: unknown): m is AssistantMessage {
  * transcript. When the agent ended in error, surfaces it as `isError: true`.
  */
 export function buildResultChunk(messages: readonly unknown[]): MessageChunk {
-  const last = [...messages].reverse().find(isAssistantMessage);
+  const last: import('@mariozechner/pi-ai').AssistantMessage | undefined = (():
+    | import('@mariozechner/pi-ai').AssistantMessage
+    | undefined => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (isAssistantMessage(messages[i]))
+        return messages[i] as import('@mariozechner/pi-ai').AssistantMessage;
+    }
+    return undefined;
+  })();
   if (!last) {
     // agent_end fired with no assistant message in the transcript. This
     // shouldn't happen in healthy Pi runs — surface it as a loud error

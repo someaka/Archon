@@ -37,14 +37,15 @@ describe('HermesSessionPool', () => {
     expect(pool.get('/nonexistent', 'model')).toBeUndefined();
   });
 
-  test('set + get returns the session and updates lastUsed', () => {
+  test('set + get returns the session and does not update lastUsed', () => {
     pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
     const session = makeSession({ lastUsed: 1000 });
     pool.set('/tmp', 'model', session);
 
     const result = pool.get('/tmp', 'model');
     expect(result).toBe(session);
-    expect(result!.lastUsed).toBeGreaterThan(1000);
+    // get() no longer updates lastUsed — only acquire() does
+    expect(result!.lastUsed).toBe(1000);
   });
 
   test('delete kills the process and removes from pool', () => {
@@ -151,9 +152,10 @@ describe('HermesSessionPool', () => {
     pool.set('/dir1', 'm1', makeSession({ client: clientIdle }));
     pool.set('/dir2', 'm2', makeSession({ client: clientActive }));
 
-    // Keep clientActive active
+    // Keep clientActive active via acquire/release (get() no longer resets lastUsed)
     const interval = setInterval(() => {
-      pool.get('/dir2', 'm2');
+      const s = pool.acquire('/dir2', 'm2');
+      if (s) pool.release('/dir2', 'm2');
     }, 30);
     await new Promise(r => setTimeout(r, 200));
     clearInterval(interval);
@@ -319,5 +321,86 @@ describe('HermesSessionPool', () => {
     pool.set('/tmp', 'model', session);
 
     expect(session.inUse).toBe(false);
+  });
+
+  // ── Regression: Dead session eviction on acquire ──────────────────────
+  // Verifier finding #11: pool.acquire() checks inUse but never
+  // client.isAlive(). Dead sessions are handed out with inUse=true,
+  // then the provider has to detect and evict them. Fix: add isAlive()
+  // check inside acquire() that kills + removes dead sessions.
+
+  test('acquire returns undefined for dead session (isAlive=false) and evicts it', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const client = mockHermesAcpClient();
+    // Mock isAlive to return false (dead process)
+    (client.isAlive as any).mockReturnValue(false);
+    const session = makeSession({ client });
+    pool.set('/tmp', 'model', session);
+
+    expect(pool.size).toBe(1);
+
+    const acquired = pool.acquire('/tmp', 'model');
+    // Dead session should NOT be handed out
+    expect(acquired).toBeUndefined();
+    // Dead session should have been evicted from the pool
+    expect(pool.size).toBe(0);
+    // Dead session's client should have been disposed
+    expect(client.dispose).toHaveBeenCalled();
+  });
+
+  // ── Regression: Dead session eviction on release ──────────────────────
+  // Verifier finding #12: pool.release() sets inUse=false unconditionally
+  // on dead sessions, "resurrecting zombies" that can be re-acquired.
+  // Fix: add isAlive() check inside release() that kills + removes dead
+  // sessions instead of setting inUse=false.
+
+  test('release on dead session removes from pool instead of resurrecting zombie', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const client = mockHermesAcpClient();
+    const session = makeSession({ client });
+    pool.set('/tmp', 'model', session);
+
+    // Acquire the session (marks inUse=true)
+    const acquired = pool.acquire('/tmp', 'model');
+    expect(acquired).toBe(session);
+    expect(acquired!.inUse).toBe(true);
+
+    // Process dies while in use
+    (client.isAlive as any).mockReturnValue(false);
+
+    // Release the dead session
+    pool.release('/tmp', 'model');
+
+    // The session should be evicted (not resurrected with inUse=false)
+    expect(pool.size).toBe(0);
+    expect(client.dispose).toHaveBeenCalled();
+
+    // Trying to acquire again should fail (session removed)
+    const reacquired = pool.acquire('/tmp', 'model');
+    expect(reacquired).toBeUndefined();
+  });
+
+  // ── Regression: Idle timer accuracy ───────────────────────────────────
+  // Verifier finding #13: get() updates lastUsed on every read, which
+  // prevents the idle cleanup timer from ever expiring for sessions that
+  // are only read (not actually used). Fix: get() should be read-only
+  // and not reset lastUsed. Only acquire() should update lastUsed.
+
+  test('get() does not reset lastUsed — only acquire() does', () => {
+    pool = new HermesSessionPool({ cleanupIntervalMs: 600_000 });
+    const session = makeSession({ lastUsed: 1000 });
+    pool.set('/tmp', 'model', session);
+
+    // Read the session via get()
+    const result = pool.get('/tmp', 'model');
+    expect(result).toBe(session);
+
+    // lastUsed should NOT be updated by get() — it stays at the original value
+    expect(result!.lastUsed).toBe(1000);
+
+    // acquire() SHOULD update lastUsed
+    const acquired = pool.acquire('/tmp', 'model');
+    expect(acquired).toBe(session);
+    expect(acquired!.lastUsed).toBeGreaterThan(1000);
   });
 });

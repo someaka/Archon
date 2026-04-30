@@ -419,6 +419,131 @@ describe('HermesAcpClient', () => {
 
     // Dispose while bridge is active — should not throw
     expect(() => client.dispose()).not.toThrow();
+    // With active bridge, kill is deferred to microtask — wait for it
+    await new Promise(resolve => setTimeout(resolve, 10));
     expect(client.isAlive()).toBe(false);
+  });
+
+  // ── Regression: Spawn error handling (ENOENT) ─────────────────────────
+  // Verifier finding #14: If spawn() fails with ENOENT (binary not found),
+  // the error should be surfaced in init()/prompt(), not silently swallowed.
+  // The constructor captures spawn errors in _spawnError.
+
+  test('spawn ENOENT is surfaced in init() call', async () => {
+    currentMock = createAcpMock();
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    // Simulate ENOENT spawn error
+    currentMock.process.emit('error', new Error('spawn hermes ENOENT'));
+
+    // init() should surface the spawn error
+    const { error } = await consume(client.init('Hello'));
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('ENOENT');
+    client.dispose();
+  });
+
+  test('spawn ENOENT is surfaced in prompt() call', async () => {
+    currentMock = createAcpMock({ sessionId: 'spawn-err-session' });
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    // init succeeds first
+    await consume(client.init('Hello'));
+    expect(client.sessionId).toBe('spawn-err-session');
+
+    // Now simulate spawn error (process dies between init and prompt)
+    currentMock.process.emit('error', new Error('SIGKILL'));
+
+    // prompt() should surface the error
+    const { error } = await consume(client.prompt('Follow up'));
+    expect(error).toBeDefined();
+    expect(error!.message).toContain('SIGKILL');
+    client.dispose();
+  });
+
+  // ── Regression: Mutual exclusion ──────────────────────────────────────
+  // Verifier finding #15: Concurrent init()+prompt() calls must not run
+  // simultaneously on the same client. The _operationInProgress flag should
+  // cause the second call to throw.
+
+  test('concurrent init() + prompt() throws "Another operation is in progress"', async () => {
+    currentMock = createAcpMock({ sessionId: 'mutex-session' });
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    // Start init() — don't consume it all yet, just get the generator going
+    const initGen = client.init('Hello');
+    // Pull one chunk to start the bridge
+    await initGen.next();
+
+    // While init's bridge is active, prompt() should throw
+    const { error } = await consume(client.prompt('Concurrent'));
+    expect(error).toBeDefined();
+    expect(error!.message).toMatch(/operation.*in progress/i);
+
+    // Finish consuming init to clean up
+    await consume(initGen);
+    client.dispose();
+  });
+
+  // ── Regression: unref() on child process ──────────────────────────────
+  // Verifier finding #16: The constructor must call childProcess.unref()
+  // to prevent the child process from keeping the parent alive (e.g.,
+  // discarded client shouldn't prevent Node.js from exiting).
+
+  test('constructor calls unref() on child process', () => {
+    currentMock = createAcpMock();
+    // Track unref calls
+    const unrefSpy = mock(() => {});
+    (currentMock.process as any).unref = unrefSpy;
+
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    // unref() should have been called during construction
+    expect(unrefSpy).toHaveBeenCalledTimes(1);
+    client.dispose();
+  });
+
+  // ── Regression: Async dispose ─────────────────────────────────────────
+  // Verifier finding #17: dispose() should await bridge cleanup (removing
+  // stdout/stderr/exit/error listeners) BEFORE sending SIGKILL. If SIGKILL
+  // fires before cleanup, the bridge's finally block may not run (process
+  // already dead).
+
+  test('dispose() awaits bridge cleanup before killing process', async () => {
+    currentMock = createAcpMock({ sessionId: 'async-dispose' });
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    await consume(client.init('Hello'));
+
+    // Start a prompt (keep bridge active)
+    const promptGen = client.prompt('Test');
+    // Pull one chunk to ensure bridge is running
+    const firstResult = await promptGen.next();
+    expect(firstResult.done).toBe(false);
+
+    // Record the kill order
+    const killOrder: string[] = [];
+    const originalKill = currentMock.process.kill.bind(currentMock.process);
+    (currentMock.process as any).kill = (signal?: any) => {
+      killOrder.push(`kill:${signal}`);
+      return originalKill(signal);
+    };
+
+    // dispose() is async and should await bridge cleanup first
+    await client.dispose();
+
+    // After dispose, the process should have been killed
+    expect(killOrder.some(k => k.includes('SIGKILL'))).toBe(true);
+    // The client should no longer be alive
+    expect(client.isAlive()).toBe(false);
+  });
+
+  test('dispose() returns void (synchronous)', () => {
+    currentMock = createAcpMock();
+    const client = new HermesAcpClient({ binary: 'hermes', cwd: '/tmp' });
+
+    const result = client.dispose();
+    // dispose() is synchronous — returns undefined (void)
+    expect(result).toBeUndefined();
   });
 });

@@ -190,31 +190,30 @@ export class HermesProvider implements IAgentProvider {
     resumeSessionId?: string,
     options?: SendQueryOptions
   ): AsyncGenerator<MessageChunk> {
-    await this.lock.acquire();
-    try {
-      let lastError: Error | undefined;
-      for (let attempt = 0; attempt <= MAX_SUBPROCESS_RETRIES; attempt++) {
-        if (options?.abortSignal?.aborted) throw new Error('Query aborted');
-        try {
-          yield* this._sendQueryOnce(prompt, cwd, resumeSessionId, options);
-          return;
-        } catch (err) {
-          const error = err instanceof Error ? err : new Error(String(err));
-          const classified =
-            error instanceof HermesClassifiedError
-              ? error.classification
-              : classifyHermesError(error.message);
-          if (!classified.shouldRetry || attempt >= MAX_SUBPROCESS_RETRIES) throw error;
-          const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
-          getLog().info({ attempt, delayMs }, 'hermes.retrying_query');
-          await new Promise(resolve => setTimeout(resolve, delayMs));
-          lastError = error;
-        }
+    let lastError: Error | undefined;
+    for (let attempt = 0; attempt <= MAX_SUBPROCESS_RETRIES; attempt++) {
+      if (options?.abortSignal?.aborted) throw new Error('Query aborted');
+      await this.lock.acquire();
+      try {
+        yield* this._sendQueryOnce(prompt, cwd, resumeSessionId, options);
+        return;
+      } catch (err) {
+        const error = err instanceof Error ? err : new Error(String(err));
+        const classified =
+          error instanceof HermesClassifiedError
+            ? error.classification
+            : classifyHermesError(error.message);
+        if (!classified.shouldRetry || attempt >= MAX_SUBPROCESS_RETRIES) throw error;
+        lastError = error;
+      } finally {
+        this.lock.release();
       }
-      throw lastError ?? new Error('Hermes query failed after retries');
-    } finally {
-      this.lock.release();
+      // Backoff sleeps OUTSIDE the lock (#5)
+      const delayMs = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+      getLog().info({ attempt, delayMs }, 'hermes.retrying_query');
+      await new Promise(resolve => setTimeout(resolve, delayMs));
     }
+    throw lastError ?? new Error('Hermes query failed after retries');
   }
 
   /**

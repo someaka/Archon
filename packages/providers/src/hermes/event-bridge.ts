@@ -175,6 +175,7 @@ export async function* bridgeHermesSession(
   let requestResolve: ((msg: JsonRpcMessage) => void) | undefined;
   let requestReject: ((err: Error) => void) | undefined;
   let stdinErrorHandler: ((err: Error) => void) | undefined;
+  let drainHandler: (() => void) | undefined;
   const activeTimers = new Map<number, ReturnType<typeof setTimeout>>();
 
   if (!childProcess.stdout) {
@@ -311,6 +312,11 @@ export async function* bridgeHermesSession(
       requestResolve = undefined;
       pendingRequestId = undefined;
     }
+    // Clear all active timers to prevent stale closures (#4)
+    activeTimers.forEach(timer => {
+      clearTimeout(timer);
+    });
+    activeTimers.clear();
     if (stdinErrorHandler && childProcess.stdin) {
       childProcess.stdin.removeListener('error', stdinErrorHandler);
       stdinErrorHandler = undefined;
@@ -468,16 +474,18 @@ export async function* bridgeHermesSession(
           reject(new Error('Hermes ACP child process stdin is not available'));
           return;
         }
-        childProcess.stdin.once('error', err => {
+        stdinErrorHandler = (err: Error): void => {
           getLog().warn({ err }, 'acp.stdin_error');
           reject(new Error(`Hermes ACP stdin error: ${err.message}`));
-        });
+        };
+        childProcess.stdin.once('error', stdinErrorHandler);
         const data = serializeMessage(req);
         const canWrite = childProcess.stdin.write(data);
         if (!canWrite) {
-          childProcess.stdin.once('drain', () => {
+          drainHandler = (): void => {
             getLog().debug('acp.stdin_drain_complete');
-          });
+          };
+          childProcess.stdin.once('drain', drainHandler);
         }
       }),
       new Promise<JsonRpcMessage>((_resolve, reject) => {
@@ -686,7 +694,9 @@ export async function* bridgeHermesSession(
 
     // Start prompt concurrently — the consumer loop below will yield
     // session/update notifications as they arrive during prompt processing.
-    void executePrompt();
+    void executePrompt().catch(err => {
+      getLog().warn({ err }, 'hermes.bridge.execute_prompt_unhandled');
+    });
   } catch (err) {
     getLog().error({ err }, 'hermes.bridge.acp_request_failed');
     const errorMessage = err instanceof Error ? err.message : String(err);
@@ -729,6 +739,10 @@ export async function* bridgeHermesSession(
     if (childProcess.stderr) childProcess.stderr.removeListener('data', stderrHandler);
     childProcess.removeListener('exit', exitHandler);
     childProcess.removeListener('error', errorHandler);
+    if (drainHandler && childProcess.stdin) {
+      childProcess.stdin.removeListener('drain', drainHandler);
+      drainHandler = undefined;
+    }
 
     // Ensure the child process is definitely killed if still running.
     // Skip in prompt-only mode or keepAlive to preserve the existing session.

@@ -1051,7 +1051,7 @@ describe('PiProvider', () => {
   });
 
   test('extensions are disabled by default (noExtensions: true)', async () => {
-    process.env.GEMINI_API_KEY='***';
+    process.env.GEMINI_API_KEY = '***';
     resetScript(scriptedAgentEnd());
 
     await consume(
@@ -1427,7 +1427,7 @@ describe('PiProvider', () => {
     // no uiContext keeps Pi's internal noOpUIContext active so hasUI stays
     // false — extensions that gate UI flows (like plannotator) will auto-approve
     // in this mode.
-    process.env.GEMINI_API_KEY='***';
+    process.env.GEMINI_API_KEY = '***';
     resetScript(scriptedAgentEnd());
 
     await consume(
@@ -1443,7 +1443,7 @@ describe('PiProvider', () => {
   });
 
   test('default (nothing set) does NOT bind extensions — extensions off by default', async () => {
-    process.env.GEMINI_API_KEY='***';
+    process.env.GEMINI_API_KEY = '***';
     resetScript(scriptedAgentEnd());
 
     await consume(
@@ -1549,6 +1549,62 @@ describe('PiProvider', () => {
     } finally {
       delete process.env.PI_TEST_SHELL_WINS;
     }
+  });
+
+  // ── Regression: process.env cleanup after sendQuery ──────────────────────
+  // Verifier finding #1: config-level env vars injected into process.env
+  // are never cleaned up. In long-lived processes (Archon server), stale
+  // keys persist across workflow runs. The fix tracks applied keys and
+  // removes them in a try/finally.
+
+  test('process.env cleanup — applied config env vars are removed after sendQuery', async () => {
+    // Ensure the test key is NOT set before sendQuery
+    delete process.env.PI_REGRESSION_CLEANUP_KEY;
+    process.env.GEMINI_API_KEY = '***';
+    resetScript(scriptedAgentEnd());
+
+    await consume(
+      new PiProvider().sendQuery('hi', '/tmp', undefined, {
+        model: 'google/gemini-2.5-pro',
+        assistantConfig: { env: { PI_REGRESSION_CLEANUP_KEY: 'should-be-cleaned-up' } },
+      })
+    );
+
+    // After sendQuery completes, the applied key should be removed from process.env
+    expect(process.env.PI_REGRESSION_CLEANUP_KEY).toBeUndefined();
+
+    // Cleanup (defensive)
+    delete process.env.PI_REGRESSION_CLEANUP_KEY;
+  });
+
+  // ── Regression: process.env already-set vars not clobbered ──────────────
+  // Verifier finding #2: When process.env already has a key, the config
+  // env should NOT overwrite it. After the fix, the applied key should
+  // also be cleaned up only if it was NEWLY set by sendQuery (not if it
+  // was already present).
+
+  test('process.env already-set — existing env var is not clobbered AND not cleaned up', async () => {
+    // Pre-set the key in process.env
+    process.env.PI_REGRESSION_EXISTING = 'original-value';
+    process.env.GEMINI_API_KEY = '***';
+    resetScript(scriptedAgentEnd());
+
+    await consume(
+      new PiProvider().sendQuery('hi', '/tmp', undefined, {
+        model: 'google/gemini-2.5-pro',
+        assistantConfig: { env: { PI_REGRESSION_EXISTING: 'config-override' } },
+      })
+    );
+
+    // The existing value should NOT have been overwritten
+    expect(process.env.PI_REGRESSION_EXISTING).toBe('original-value');
+
+    // After sendQuery, the pre-existing key should still be present
+    // (cleanup only removes keys that were NEWLY applied)
+    expect(process.env.PI_REGRESSION_EXISTING).toBeDefined();
+
+    // Cleanup
+    delete process.env.PI_REGRESSION_EXISTING;
   });
 
   // Semaphore tests run last — the module-level piSemaphore singleton persists

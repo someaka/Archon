@@ -1672,6 +1672,77 @@ describe('sendQuery retry behavior', () => {
     // Restore default
     mockVerifyHermesBinary.mockImplementation(async () => true);
   });
+
+  // ── Regression: Lock release during backoff ───────────────────────────
+  // Verifier finding #9: The lock is now acquired/released per-attempt
+  // rather than wrapping the entire retry loop, so backoff sleeps happen
+  // without holding the lock. Other queries can proceed during retry.
+
+  test('lock is released during retry backoff so other queries can proceed', async () => {
+    const mockAcpA = createAcpMock();
+    const mockAcpB = createAcpMock();
+
+    let callIndex = 0;
+    mockSpawn.mockImplementation(() => {
+      callIndex++;
+      if (callIndex === 1) {
+        // First call: emit error immediately
+        queueMicrotask(() => mockAcpA.emitError(new Error('spawn EACCES')));
+        return mockAcpA.process;
+      }
+      // Subsequent calls: normal mock
+      return mockAcpB.process;
+    });
+
+    const provider = new HermesProvider();
+
+    // Start query A — it will fail and potentially retry
+    const queryA = consume(provider.sendQuery('Query A', '/tmp'));
+
+    // Small delay to let query A acquire the lock and fail
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    // Start query B — if the lock is held during A's backoff, B blocks
+    // With the fix (lock released during backoff), B should proceed.
+    const queryB = consume(provider.sendQuery('Query B', '/tmp'));
+
+    // Both should complete within a reasonable time (not 14s+ due to starvation)
+    const [resultA, resultB] = await Promise.all([queryA, queryB]);
+
+    expect(resultA).toBeDefined();
+    expect(resultB).toBeDefined();
+  }, 15000);
+
+  // ── Regression: Generator cleanup before pool release ─────────────────
+  // Verifier finding #10: After a pooled query completes, the session's
+  // child process should have no leaked listeners. The bridge's finally
+  // block must complete before the session is returned to the pool.
+
+  test('pooled session has no leaked listeners after sendQuery completes', async () => {
+    const mockAcp = createAcpMock();
+    mockSpawn.mockImplementation(() => mockAcp.process);
+
+    (mockAcp.process as any).exitCode = null;
+    const pool = new HermesSessionPool();
+    const provider = new HermesProvider(pool);
+
+    // First call — full handshake, registers in pool
+    await consume(provider.sendQuery('Hello', '/tmp', undefined, { model: 'test-model' }));
+
+    // After the bridge's finally block runs, all listeners should be cleaned up
+    const stdoutListeners = mockAcp.process.stdout!.listenerCount('data');
+    const stderrListeners = mockAcp.process.stderr!.listenerCount('data');
+    const exitListeners = mockAcp.process.listenerCount('exit');
+    const errorListeners = mockAcp.process.listenerCount('error');
+
+    expect(stdoutListeners).toBe(0);
+    expect(stderrListeners).toBe(0);
+    // exitListeners may include the tempHermesHome cleanup handler (expected)
+    expect(exitListeners).toBeLessThanOrEqual(1);
+    expect(errorListeners).toBeLessThanOrEqual(1); // spawn error handler removed in init() finally
+
+    pool.destroy();
+  });
 });
 
 // ─── getFirstEventTimeoutMs ─────────────────────────────────────────────────

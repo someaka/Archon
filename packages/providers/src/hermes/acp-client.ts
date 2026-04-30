@@ -47,6 +47,10 @@ export class HermesAcpClient {
   private _sessionId: string | undefined;
   private _activeBridge: AsyncGenerator<MessageChunk> | undefined;
   private _disposed = false;
+  private _spawnError: Error | undefined;
+  private _operationInProgress = false;
+
+  private _spawnErrorHandler: ((err: Error) => void) | undefined;
 
   constructor(private config: HermesAcpClientConfig) {
     this._childProcess = spawn(config.binary, config.args ?? ['acp'], {
@@ -54,6 +58,15 @@ export class HermesAcpClient {
       env: config.env ? { ...process.env, ...config.env } : undefined,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    // Prevent child process from keeping parent alive (#12)
+    this._childProcess.unref();
+
+    // Capture spawn errors (ENOENT, EACCES) so init()/prompt() can surface them (#10)
+    this._spawnErrorHandler = (err: Error): void => {
+      this._spawnError = err;
+    };
+    this._childProcess.on('error', this._spawnErrorHandler);
   }
 
   // ── Getters ─────────────────────────────────────────────────────────
@@ -92,6 +105,9 @@ export class HermesAcpClient {
     if (this._disposed) {
       throw new Error('HermesAcpClient has been disposed');
     }
+    if (this._spawnError) throw this._spawnError;
+    if (this._operationInProgress) throw new Error('Another operation is in progress');
+    this._operationInProgress = true;
 
     const bridge = bridgeHermesSession(
       this._childProcess,
@@ -117,6 +133,7 @@ export class HermesAcpClient {
       }
     } finally {
       this._activeBridge = undefined;
+      this._operationInProgress = false;
     }
   }
 
@@ -134,9 +151,12 @@ export class HermesAcpClient {
     if (this._disposed) {
       throw new Error('HermesAcpClient has been disposed');
     }
+    if (this._spawnError) throw this._spawnError;
+    if (this._operationInProgress) throw new Error('Another operation is in progress');
     if (!this._sessionId) {
       throw new Error('No active session. Call init() first.');
     }
+    this._operationInProgress = true;
 
     const bridge = bridgeHermesSession(
       this._childProcess,
@@ -160,6 +180,7 @@ export class HermesAcpClient {
       }
     } finally {
       this._activeBridge = undefined;
+      this._operationInProgress = false;
     }
   }
 
@@ -171,22 +192,44 @@ export class HermesAcpClient {
    * child process with SIGKILL.
    *
    * Idempotent — calling multiple times is safe (subsequent calls are no-ops).
+   *
+   * Note: dispose() is intentionally synchronous. Making it async and
+   * awaiting bridge.return() causes a deadlock because the bridge's
+   * for-await loop awaits the queue's iterate() generator, which can only
+   * be unblocked by queue.close() in the bridge's finally block — but
+   * the finally block can't run until bridge.return() completes.
    */
   dispose(): void {
     if (this._disposed) return;
     this._disposed = true;
 
-    // Signal active bridge to clean up handlers
-    if (this._activeBridge) {
-      void this._activeBridge.return(undefined);
-      this._activeBridge = undefined;
+    // Remove spawn error handler
+    if (this._spawnErrorHandler) {
+      this._childProcess.removeListener('error', this._spawnErrorHandler);
+      this._spawnErrorHandler = undefined;
     }
 
-    // Kill the child process
-    try {
-      this._childProcess.kill('SIGKILL');
-    } catch {
-      // Process may already be dead (ESRCH) or we lack permissions (EPERM)
+    // Signal active bridge to clean up handlers (fire-and-forget)
+    if (this._activeBridge) {
+      const bridge = this._activeBridge;
+      this._activeBridge = undefined;
+      // eslint-disable-next-line @typescript-eslint/no-empty-function -- intentional fire-and-forget
+      void bridge.return(undefined).catch((): void => {});
+      // Kill after a microtask to let bridge cleanup start (#13)
+      queueMicrotask(() => {
+        try {
+          this._childProcess.kill('SIGKILL');
+        } catch {
+          // Process may already be dead (ESRCH) or we lack permissions (EPERM)
+        }
+      });
+    } else {
+      // No active bridge — kill immediately
+      try {
+        this._childProcess.kill('SIGKILL');
+      } catch {
+        // Process may already be dead (ESRCH) or we lack permissions (EPERM)
+      }
     }
   }
 }

@@ -42,9 +42,7 @@ export class HermesSessionPool {
   get(cwd: string, model: string, provider?: string): PooledSession | undefined {
     const key = this.makeKey(cwd, model, provider);
     const session = this.sessions.get(key);
-    if (session) {
-      session.lastUsed = Date.now();
-    }
+    // lastUsed is only updated by acquire() when the session is actually used (#9)
     return session;
   }
 
@@ -58,6 +56,12 @@ export class HermesSessionPool {
     const session = this.sessions.get(key);
     if (session) {
       if (session.inUse) {
+        return undefined;
+      }
+      // Check if the underlying process is still alive (#7)
+      if (!session.client.isAlive()) {
+        this.killSession(session);
+        this.sessions.delete(key);
         return undefined;
       }
       session.inUse = true;
@@ -75,6 +79,12 @@ export class HermesSessionPool {
     const key = this.makeKey(cwd, model, provider);
     const session = this.sessions.get(key);
     if (session) {
+      // If process died while in use, evict instead of releasing (#8)
+      if (!session.client.isAlive()) {
+        this.killSession(session);
+        this.sessions.delete(key);
+        return;
+      }
       session.inUse = false;
     }
   }

@@ -207,10 +207,14 @@ export class PiProvider implements IAgentProvider {
     //    Shell env wins: we only set keys not already present. Request-level
     //    `requestOptions.env` remains a separate channel — it flows through
     //    bash spawn hooks for subprocess isolation, not into process.env.
+    //    Originals are captured here and restored in the finally block so
+    //    injected keys don't leak across workflow runs in long-lived servers.
+    const envOriginals = new Map<string, string | undefined>();
     if (piConfig.env) {
       const applied: string[] = [];
       for (const [key, value] of Object.entries(piConfig.env)) {
         if (process.env[key] === undefined) {
+          envOriginals.set(key, process.env[key]);
           process.env[key] = value;
           applied.push(key);
         }
@@ -336,19 +340,19 @@ export class PiProvider implements IAgentProvider {
       );
     }
 
-    // 4. Translate Archon nodeConfig to Pi SDK options. All three translations
+    // 5. Translate Archon nodeConfig to Pi SDK options. All three translations
     //    below correspond to capability flags declared `true` in
     //    PI_CAPABILITIES; nodeConfig fields that don't map cleanly still
     //    trigger a dag-executor warning upstream.
     const nodeConfig = requestOptions?.nodeConfig;
 
-    //    4a. thinkingLevel: covers `thinking`/`effort` nodeConfig fields.
+    //    5a. thinkingLevel: covers `thinking`/`effort` nodeConfig fields.
     const { level: thinkingLevel, warning: thinkingWarning } = resolvePiThinkingLevel(nodeConfig);
     if (thinkingWarning) {
       yield { type: 'system', content: `⚠️ ${thinkingWarning}` };
     }
 
-    //    4b. tools: covers allowed_tools / denied_tools. `undefined` leaves Pi
+    //    5b. tools: covers allowed_tools / denied_tools. `undefined` leaves Pi
     //        defaults; an explicit empty array means "no tools" (valid idiom
     //        matching e2e-claude-smoke's `allowed_tools: []`).
     //        requestOptions.env (codebase-scoped env vars from .archon/config.yaml)
@@ -366,11 +370,11 @@ export class PiProvider implements IAgentProvider {
       };
     }
 
-    //    4c. systemPrompt: request-level (AgentRequestOptions) wins over
+    //    5c. systemPrompt: request-level (AgentRequestOptions) wins over
     //        node-level; either overrides Pi's default.
     const systemPrompt = requestOptions?.systemPrompt ?? nodeConfig?.systemPrompt;
 
-    //    4d. skills: Archon uses name references (e.g. `skills: [agent-browser]`).
+    //    5d. skills: Archon uses name references (e.g. `skills: [agent-browser]`).
     //        Resolve each name against .agents/skills and .claude/skills (project
     //        + user-global). Resolved paths go through Pi's additionalSkillPaths;
     //        Pi's buildSystemPrompt appends their agentskills.io XML block to
@@ -383,7 +387,7 @@ export class PiProvider implements IAgentProvider {
       };
     }
 
-    // 5. Session management. Pi stores each session as a JSONL file under
+    // 6. Session management. Pi stores each session as a JSONL file under
     //    ~/.pi/agent/sessions/<encoded-cwd>/<uuid>.jsonl. `resolvePiSession`
     //    returns a SessionManager bound to either a new session (no resume
     //    id) or an existing session (resume id matches a file); if the id
@@ -514,7 +518,7 @@ export class PiProvider implements IAgentProvider {
       yield { type: 'system', content: `⚠️ ${modelFallbackMessage}` };
     }
 
-    // 4e. Extension flag pass-through. Must happen before bindExtensions
+    // 5e. Extension flag pass-through. Must happen before bindExtensions
     //     below — extensions read flags inside their session_start handler.
     if (enableExtensions && piConfig.extensionFlags) {
       const runner = session.extensionRunner;
@@ -533,7 +537,7 @@ export class PiProvider implements IAgentProvider {
       }
     }
 
-    // 4f. Bind UI context (so ctx.hasUI is true and ctx.ui.notify() forwards
+    // 5f. Bind UI context (so ctx.hasUI is true and ctx.ui.notify() forwards
     //     into the chunk stream) or fire session_start with no UI. Must run
     //     after flag pass-through above.
     const uiBridge = interactive ? createArchonUIBridge() : undefined;
@@ -544,7 +548,7 @@ export class PiProvider implements IAgentProvider {
       await session.bindExtensions({});
     }
 
-    // 5. Structured output (best-effort). Pi has no SDK-level JSON schema
+    // 7. Structured output (best-effort). Pi has no SDK-level JSON schema
     //    mode the way Claude and Codex do, so we implement it via prompt
     //    engineering: append the schema + "JSON only, no fences" instruction,
     //    and have the bridge parse the accumulated assistant text on
@@ -555,7 +559,7 @@ export class PiProvider implements IAgentProvider {
       ? augmentPromptForJsonSchema(prompt, outputFormat.schema)
       : prompt;
 
-    // 6. Bridge callback-based events to the async generator contract.
+    // 8. Bridge callback-based events to the async generator contract.
     //    bridgeSession owns dispose() and abort wiring. When `interactive`
     //    is on, it also binds/unbinds the UI stub's emitter so extension
     //    notifications land on the same queue as Pi events.
@@ -593,6 +597,16 @@ export class PiProvider implements IAgentProvider {
       throw err;
     } finally {
       sem?.release();
+      // Restore process.env keys injected at step 0 so they don't leak
+      // across workflow runs in long-lived server processes.
+      for (const [key, orig] of envOriginals) {
+        if (orig === undefined) {
+          // eslint-disable-next-line @typescript-eslint/no-dynamic-delete -- cleaning up dynamically-set env keys
+          delete process.env[key];
+        } else {
+          process.env[key] = orig;
+        }
+      }
     }
   }
 

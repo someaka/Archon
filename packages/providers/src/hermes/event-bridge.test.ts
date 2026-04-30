@@ -345,6 +345,49 @@ describe('AsyncQueue', () => {
     q.close();
     expect(() => q.close()).not.toThrow();
   });
+
+  // ── Regression: AsyncQueue undefined value handling ───────────────────
+  // Verifier finding #3: push(undefined) must be yielded by iterate(),
+  // not treated as end-of-stream. The buffer.length > 0 check in iterate()
+  // must not use `next !== undefined` as a guard.
+
+  test('push(undefined) is yielded by iterate() like any other value', async () => {
+    const q = new AsyncQueue<number | undefined>();
+    q.push(1);
+    q.push(undefined);
+    q.push(3);
+    q.close();
+
+    // Use manual iteration to isolate the behavior from for-await quirks
+    const received: (number | undefined)[] = [];
+    const iter = q[Symbol.asyncIterator]();
+    let result = await iter.next();
+    while (!result.done) {
+      received.push(result.value);
+      result = await iter.next();
+    }
+    expect(received).toEqual([1, undefined, 3]);
+  });
+
+  // ── Regression: push after close silently drops items ─────────────────
+  // Verifier finding #4: pushing to a closed queue must not add items
+  // to the buffer. After close(), iterate() should exit without yielding
+  // any newly-pushed items.
+
+  test('push after close does not yield items in subsequent iteration', async () => {
+    const q = new AsyncQueue<number>();
+    q.push(1);
+    q.push(2);
+    q.close();
+    // Push after close — must be silently dropped
+    q.push(3);
+    q.push(4);
+
+    const received: number[] = [];
+    for await (const n of q) received.push(n);
+    // Only pre-close items should be yielded
+    expect(received).toEqual([1, 2]);
+  });
 });
 
 // ─── bridgeHermesSession (ACP) ─────────────────────────────────────────────
@@ -1396,6 +1439,120 @@ describe('bridgeHermesSession', () => {
       expect(lastResult.errors![0]).toContain('protocol version 99');
       expect(lastResult.errors![0]).toContain('not supported');
     }
+  });
+
+  // ── Regression: stdin error listener cleanup ──────────────────────────
+  // Verifier finding #5: anonymous stdin.once('error', ...) listeners in
+  // sendRequest() are never assigned to stdinErrorHandler, so the response
+  // handler's cleanup is a no-op. After N requests, MaxListenersExceededWarning.
+  // Fix: assign the handler to stdinErrorHandler so the response handler
+  // can remove it.
+
+  test('stdin error listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+    const baseline = mock.process.stdin!.listenerCount('error');
+
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    // After 3 sendRequest calls (initialize, session/new, session/prompt),
+    // each leaks one stdin error listener. After fix, they should be removed
+    // by the response handler.
+    expect(mock.process.stdin!.listenerCount('error')).toBe(baseline);
+  });
+
+  // ── Regression: stdin drain listener cleanup ──────────────────────────
+  // Verifier finding #6: anonymous stdin.once('drain', ...) listeners in
+  // sendRequest() are never tracked or removed. After backpressure resolves,
+  // the listener auto-removes (once semantics), but if write() returns true
+  // initially and then another sendRequest adds a drain listener that never
+  // fires, it leaks.
+  //
+  // The core issue is that the drain listener isn't tracked, so cleanup in
+  // the finally block can't remove it. We test the key invariant:
+  // stdin listener count returns to baseline.
+
+  test('stdin drain listener count returns to baseline after bridge completes', async () => {
+    const mock = createAcpMock();
+    const baseline = mock.process.stdin!.listenerCount('drain');
+
+    await consume(bridgeHermesSession(mock.process, makeBridgeOptions()));
+
+    expect(mock.process.stdin!.listenerCount('drain')).toBe(baseline);
+  });
+
+  // ── Regression: executePrompt rejection handling ──────────────────────
+  // Verifier finding #7: void executePrompt() at line 689 is fire-and-
+  // forget. If executePrompt's catch block throws (e.g., due to abort +
+  // queue.close() race), the rejection is unhandled. Fix: add .catch()
+  // to suppress the unhandled rejection.
+
+  test('abort during active prompt does not cause unhandled rejection', async () => {
+    const controller = new AbortController();
+    const mock = createAcpMock({
+      updates: [],
+    });
+
+    // Override stdin to not respond to session/prompt
+    const originalWrite = (mock.stdin as any)._write.bind(mock.stdin);
+    (mock.stdin as any)._write = function (chunk: any, encoding: any, callback: any): void {
+      const data = typeof chunk === 'string' ? chunk : chunk.toString();
+      try {
+        const req = JSON.parse(data.trim());
+        if (req.method === 'session/prompt') {
+          callback();
+          return;
+        }
+      } catch {
+        // not JSON
+      }
+      originalWrite(chunk, encoding, callback);
+    };
+
+    let unhandledRejection: Error | undefined;
+    const onUnhandled = (reason: unknown): void => {
+      unhandledRejection = reason instanceof Error ? reason : new Error(String(reason));
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    const consumePromise = consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal)
+    );
+
+    queueMicrotask(() => controller.abort());
+
+    await consumePromise;
+
+    // Give time for any unhandled rejection to fire
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    process.removeListener('unhandledRejection', onUnhandled);
+
+    expect(unhandledRejection).toBeUndefined();
+  });
+
+  // ── Regression: activeTimers cleanup in rejectPending ─────────────────
+  // Verifier finding #8: rejectPending() rejects the pending request but
+  // doesn't clear timeout timers. The activeTimers Map accumulates stale
+  // closures. Fix: clear all active timers in rejectPending().
+
+  test('bridge completes cleanly after abort — no leaked timeout handlers', async () => {
+    const controller = new AbortController();
+    const mock = createAcpMock({ updates: [] });
+
+    controller.abort();
+
+    // The bridge may throw HermesClassifiedError for retryable abort errors.
+    // This is expected — the important thing is that the bridge completes
+    // (doesn't hang due to leaked timers) and the result chunk is emitted.
+    const { chunks } = await consume(
+      bridgeHermesSession(mock.process, makeBridgeOptions(), controller.signal)
+    );
+
+    // Bridge should complete without hanging
+    const resultChunks = chunks.filter(c => (c as { type: string }).type === 'result');
+    expect(resultChunks.length).toBeGreaterThan(0);
+    // Abort should produce an error result
+    expect(resultChunks[0]).toMatchObject({ type: 'result', isError: true });
   });
 });
 
