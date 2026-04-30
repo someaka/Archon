@@ -653,6 +653,16 @@ function buildBaseClaudeOptions(
     );
   }
 
+  // When using Ollama gateway (ANTHROPIC_BASE_URL set), the Claude Code binary
+  // rejects non-Anthropic model names passed via --model. Instead, set
+  // ANTHROPIC_MODEL in the env and let the binary read it from there.
+  const isOllamaGateway = Boolean(env.ANTHROPIC_BASE_URL);
+  const modelForSdk = isOllamaGateway ? undefined : resolvedModel;
+  if (isOllamaGateway && resolvedModel) {
+    env.ANTHROPIC_MODEL = resolvedModel;
+    getLog().debug({ model: resolvedModel }, 'claude.model_set_via_env_for_ollama');
+  }
+
   return {
     cwd,
     // In compiled binaries, the resolver supplies an absolute executable path;
@@ -660,7 +670,7 @@ function buildBaseClaudeOptions(
     ...(cliPath !== undefined ? { pathToClaudeCodeExecutable: cliPath } : {}),
     ...(isJsExecutable ? { executableArgs: ['--no-env-file'] } : {}),
     env,
-    model: resolvedModel,
+    model: modelForSdk,
     abortController: controller,
     ...(requestOptions?.outputFormat !== undefined
       ? { outputFormat: requestOptions.outputFormat }
