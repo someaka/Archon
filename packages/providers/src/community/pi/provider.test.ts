@@ -995,7 +995,8 @@ describe('PiProvider', () => {
       | Record<string, unknown>
       | undefined;
     expect(loaderArgs?.systemPrompt).toBe('You are a careful investigator.');
-    expect(loaderArgs?.noExtensions).toBe(false);
+    // Extensions are off by default (security: untrusted repo extensions).
+    expect(loaderArgs?.noExtensions).toBe(true);
     expect(loaderArgs?.noContextFiles).toBe(true);
   });
 
@@ -1049,8 +1050,8 @@ describe('PiProvider', () => {
     expect(caps.hooks).toBe(false);
   });
 
-  test('extensions are enabled by default (noExtensions: false)', async () => {
-    process.env.GEMINI_API_KEY = 'sk-test';
+  test('extensions are disabled by default (noExtensions: true)', async () => {
+    process.env.GEMINI_API_KEY='***';
     resetScript(scriptedAgentEnd());
 
     await consume(
@@ -1062,10 +1063,10 @@ describe('PiProvider', () => {
     const loaderArgs = MockDefaultResourceLoader.mock.calls[0]?.[0] as
       | Record<string, unknown>
       | undefined;
-    // Extensions (community packages and user-authored) are a core reason
-    // users run Pi; off-by-default silently broke users who installed or
-    // authored one and expected it to fire.
-    expect(loaderArgs?.noExtensions).toBe(false);
+    // Extensions load arbitrary JS from the repo's `.pi/` directory —
+    // disabled by default to preserve the trust boundary. Opt in with
+    // `enableExtensions: true` when the repo is trusted.
+    expect(loaderArgs?.noExtensions).toBe(true);
     // Skills/prompts/themes/context stay suppressed — only extensions flip on.
     expect(loaderArgs?.noSkills).toBe(true);
     expect(loaderArgs?.noPromptTemplates).toBe(true);
@@ -1426,13 +1427,13 @@ describe('PiProvider', () => {
     // no uiContext keeps Pi's internal noOpUIContext active so hasUI stays
     // false — extensions that gate UI flows (like plannotator) will auto-approve
     // in this mode.
-    process.env.GEMINI_API_KEY = 'sk-test';
+    process.env.GEMINI_API_KEY='***';
     resetScript(scriptedAgentEnd());
 
     await consume(
       new PiProvider().sendQuery('hi', '/tmp', undefined, {
         model: 'google/gemini-2.5-pro',
-        assistantConfig: { interactive: false },
+        assistantConfig: { enableExtensions: true, interactive: false },
       })
     );
 
@@ -1441,8 +1442,8 @@ describe('PiProvider', () => {
     expect(bindings.uiContext).toBeUndefined();
   });
 
-  test('default (nothing set) binds with UIContext — extensions + interactive both on', async () => {
-    process.env.GEMINI_API_KEY = 'sk-test';
+  test('default (nothing set) does NOT bind extensions — extensions off by default', async () => {
+    process.env.GEMINI_API_KEY='***';
     resetScript(scriptedAgentEnd());
 
     await consume(
@@ -1451,9 +1452,9 @@ describe('PiProvider', () => {
       })
     );
 
-    expect(mockBindExtensions).toHaveBeenCalledTimes(1);
-    const [bindings] = mockBindExtensions.mock.calls[0] as [{ uiContext?: unknown }];
-    expect(bindings.uiContext).toBeDefined();
+    // Extensions are off by default (security: untrusted repo extensions),
+    // so bindExtensions is never called.
+    expect(mockBindExtensions).not.toHaveBeenCalled();
   });
 
   // ─── extensionFlags pass-through ──────────────────────────────────────

@@ -522,6 +522,14 @@ export class PiProvider implements IAgentProvider {
         for (const [name, value] of Object.entries(piConfig.extensionFlags)) {
           runner.setFlagValue(name, value);
         }
+      } else {
+        // Without an extensionRunner (e.g. resourceLoader.reload() failed or
+        // no extensions were discovered), setFlagValue would silently no-op.
+        // Warn so operators know their flags were not applied.
+        getLog().warn(
+          { flags: Object.keys(piConfig.extensionFlags) },
+          'pi.extension_runner_missing_flags_skipped'
+        );
       }
     }
 

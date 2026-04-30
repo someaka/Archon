@@ -1,11 +1,11 @@
-import { SessionManager } from '@mariozechner/pi-coding-agent';
+import type { SessionManager as SessionManagerType } from '@mariozechner/pi-coding-agent';
 
 /**
  * Result of resolving an Archon `resumeSessionId` against Pi's session store.
  */
 export interface ResolvedSession {
   /** SessionManager to hand to createAgentSession. */
-  sessionManager: SessionManager;
+  sessionManager: SessionManagerType;
   /**
    * True when a resumeSessionId was provided but no matching session file
    * was found — caller should surface a system warning before the new
@@ -38,16 +38,24 @@ export async function resolvePiSession(
   cwd: string,
   resumeSessionId: string | undefined
 ): Promise<ResolvedSession> {
+  // Dynamic import to maintain lazy-loading contract — Pi's config.js runs
+  // readFileSync at module init; deferring to call-time preserves the
+  // boundary that provider.ts.sendQuery() establishes.
+  // Access SessionManager via the module object rather than destructuring,
+  // because destructured PascalCase bindings trip eslint's naming-convention
+  // rule (same pattern provider.ts uses for AuthStorage, ModelRegistry, etc.).
+  const piCodingAgent = await import('@mariozechner/pi-coding-agent');
+
   if (!resumeSessionId) {
-    return { sessionManager: SessionManager.create(cwd), resumeFailed: false };
+    return { sessionManager: piCodingAgent.SessionManager.create(cwd), resumeFailed: false };
   }
 
   try {
-    const sessions = await SessionManager.list(cwd);
+    const sessions = await piCodingAgent.SessionManager.list(cwd);
     const match = sessions.find(s => s.id === resumeSessionId);
     if (match) {
       return {
-        sessionManager: SessionManager.open(match.path),
+        sessionManager: piCodingAgent.SessionManager.open(match.path),
         resumeFailed: false,
       };
     }
@@ -58,7 +66,7 @@ export async function resolvePiSession(
     if (!isMissingSessionDirError(err)) throw err;
   }
 
-  return { sessionManager: SessionManager.create(cwd), resumeFailed: true };
+  return { sessionManager: piCodingAgent.SessionManager.create(cwd), resumeFailed: true };
 }
 
 function isMissingSessionDirError(err: unknown): boolean {

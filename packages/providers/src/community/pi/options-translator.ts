@@ -307,6 +307,15 @@ export function resolvePiSkills(cwd: string, skillNames: string[] | undefined): 
     if (seen.has(rawName)) continue;
     seen.add(rawName);
 
+    // Reject path traversal — skill names must be simple directory names,
+    // not paths containing `..` or separators that could escape the
+    // expected search roots. An attacker-controlled workflow YAML could
+    // otherwise reach arbitrary directories.
+    if (rawName.includes('..') || rawName.includes('/') || rawName.includes('\\')) {
+      missing.push(rawName);
+      continue;
+    }
+
     let found: string | undefined;
     for (const root of roots) {
       const candidate = join(root, rawName);
