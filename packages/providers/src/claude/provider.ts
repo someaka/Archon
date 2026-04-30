@@ -81,6 +81,49 @@ function normalizeClaudeUsage(usage?: {
  * - stripCwdEnv() at entry point removed CWD .env keys + CLAUDECODE markers
  * - ~/.archon/.env loaded with override:true as the trusted source
  */
+/**
+ * Detect if a local Ollama gateway is running and configure env vars for it.
+ *
+ * When the user launches Claude via `ollama launch claude`, Ollama sets
+ * ANTHROPIC_BASE_URL and ANTHROPIC_AUTH_TOKEN so the Claude Code binary
+ * routes through the Ollama gateway. When Archon spawns the binary directly,
+ * these env vars are missing — this function detects the gateway and sets them.
+ *
+ * Detection criteria:
+ * 1. ANTHROPIC_BASE_URL is not already set (user explicitly configured)
+ * 2. ANTHROPIC_MODEL is set and looks like an Ollama model (contains ':')
+ * 3. Ollama is responding on localhost:11434
+ */
+async function detectAndConfigureOllamaGateway(env: NodeJS.ProcessEnv): Promise<void> {
+  // If ANTHROPIC_BASE_URL is already set, respect it
+  if (env.ANTHROPIC_BASE_URL) return;
+
+  // Check if the model looks like an Ollama model (name:tag format)
+  const model = env.ANTHROPIC_MODEL;
+  if (!model?.includes(':')) return;
+
+  // Probe Ollama gateway (quick timeout, non-blocking)
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, 2000);
+    const res = await fetch('http://localhost:11434/api/version', {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (res.ok) {
+      env.ANTHROPIC_BASE_URL = 'http://localhost:11434/v1';
+      env.ANTHROPIC_AUTH_TOKEN = 'ollama';
+      getLog().info({ model, baseUrl: env.ANTHROPIC_BASE_URL }, 'claude.ollama_gateway_detected');
+    }
+  } catch {
+    // Ollama not running — that's fine, fall through to normal auth
+    getLog().debug({ model }, 'claude.ollama_gateway_not_detected');
+  }
+}
+
 function buildSubprocessEnv(): NodeJS.ProcessEnv {
   // Using || intentionally: empty string should be treated as missing credential
   const hasExplicitTokens = Boolean(
@@ -956,6 +999,9 @@ export class ClaudeProvider implements IAgentProvider {
     // Build subprocess env once (avoids re-logging auth mode per retry)
     const subprocessEnv = buildSubprocessEnv();
     const env = requestOptions?.env ? { ...subprocessEnv, ...requestOptions.env } : subprocessEnv;
+
+    // Auto-detect Ollama gateway and configure ANTHROPIC_BASE_URL + AUTH_TOKEN
+    await detectAndConfigureOllamaGateway(env);
 
     // Apply nodeConfig translation once (deterministic, not retry-dependent)
     // We need a throwaway Options to extract warnings from applyNodeConfig,
