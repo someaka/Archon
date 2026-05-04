@@ -358,11 +358,11 @@ export class PiProvider implements IAgentProvider {
     //        requestOptions.env (codebase-scoped env vars from .archon/config.yaml)
     //        is injected into bash subprocesses via a BashSpawnHook, mirroring
     //        Claude's options.env and Codex's constructor env.
-    const { tools: filteredTools, unknownTools } = resolvePiTools(
-      cwd,
-      nodeConfig,
-      requestOptions?.env
-    );
+    const {
+      toolNames: filteredToolNames,
+      customTools,
+      unknownTools,
+    } = resolvePiTools(cwd, nodeConfig, requestOptions?.env);
     if (unknownTools.length > 0) {
       yield {
         type: 'system',
@@ -491,7 +491,7 @@ export class PiProvider implements IAgentProvider {
         modelId: parsed.modelId,
         cwd,
         thinkingLevel,
-        toolCount: filteredTools?.length,
+        toolCount: filteredToolNames?.length,
         hasSystemPrompt: systemPrompt !== undefined,
         skillCount: skillPaths.length,
         missingSkillCount: missingSkills.length,
@@ -511,7 +511,8 @@ export class PiProvider implements IAgentProvider {
       settingsManager,
       resourceLoader,
       ...(thinkingLevel ? { thinkingLevel } : {}),
-      ...(filteredTools !== undefined ? { tools: filteredTools } : {}),
+      ...(filteredToolNames !== undefined ? { tools: filteredToolNames } : {}),
+      ...(customTools !== undefined && customTools.length > 0 ? { customTools } : {}),
     });
 
     if (modelFallbackMessage) {

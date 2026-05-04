@@ -3,26 +3,12 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import {
-  codingTools,
-  createBashTool,
-  createEditTool,
-  createFindTool,
-  createGrepTool,
-  createLsTool,
-  createReadTool,
-  createWriteTool,
+  createBashToolDefinition,
   type BashSpawnContext,
   type BashSpawnHook,
+  type ToolDefinition,
 } from '@mariozechner/pi-coding-agent';
 import type { ThinkingLevel } from '@mariozechner/pi-ai';
-
-/**
- * Pi's exported `Tool` type is structurally `AgentTool<TSchema>` and isn't
- * re-exported at the package root. Deriving it from the `codingTools` aggregate
- * (which IS re-exported and typed as `Tool[]`) gives us a namespace-free alias
- * that satisfies TS's portable-type requirement.
- */
-type PiTool = (typeof codingTools)[number];
 
 import type { NodeConfig } from '../../types';
 
@@ -129,33 +115,19 @@ function buildBashSpawnHook(env: Record<string, string> | undefined): BashSpawnH
   });
 }
 
-/** Map a normalized (lowercase) Pi tool name to its Pi-internal factory. */
-function buildPiTool(name: PiToolName, cwd: string, spawnHook: BashSpawnHook | undefined): PiTool {
-  switch (name) {
-    case 'read':
-      return createReadTool(cwd);
-    case 'bash':
-      return spawnHook ? createBashTool(cwd, { spawnHook }) : createBashTool(cwd);
-    case 'edit':
-      return createEditTool(cwd);
-    case 'write':
-      return createWriteTool(cwd);
-    case 'grep':
-      return createGrepTool(cwd);
-    case 'find':
-      return createFindTool(cwd);
-    case 'ls':
-      return createLsTool(cwd);
-  }
-}
-
 export interface ResolvedTools {
   /**
-   * The tools array to pass to Pi, or `undefined` to leave Pi's default
-   * (read/bash/edit/write) in place. An empty array means "no tools —
-   * LLM-only response" which is a valid explicit setting.
+   * Tool name strings to pass as `CreateAgentSessionOptions.tools`, or
+   * `undefined` to leave Pi's default tool set in place. An empty array
+   * means "no tools — LLM-only response" which is a valid explicit setting.
    */
-  tools: PiTool[] | undefined;
+  toolNames: string[] | undefined;
+  /**
+   * When env injection requires a custom bash tool (with a BashSpawnHook),
+   * it goes here as a ToolDefinition so Pi can register it alongside the
+   * name-based tools.
+   */
+  customTools: ToolDefinition[] | undefined;
   /** Unknown tool names in allowed_tools / denied_tools (e.g. Claude-specific like WebFetch). */
   unknownTools: string[];
 }
@@ -200,9 +172,11 @@ export function resolvePiTools(
     // No restrictions. Match Pi's default tool set unless env injection forces
     // a custom bash tool (Pi's default bashTool is pre-constructed with no
     // spawnHook and there's no way to retrofit env onto it).
-    if (!spawnHook) return { tools: undefined, unknownTools: [] };
+    if (!spawnHook) return { toolNames: undefined, customTools: undefined, unknownTools: [] };
+    // Use default tool names, but register an env-injected bash via customTools
     return {
-      tools: PI_DEFAULT_TOOL_NAMES.map(n => buildPiTool(n, cwd, spawnHook)),
+      toolNames: [...PI_DEFAULT_TOOL_NAMES],
+      customTools: [createBashToolDefinition(cwd, { spawnHook }) as unknown as ToolDefinition],
       unknownTools: [],
     };
   }
@@ -242,7 +216,10 @@ export function resolvePiTools(
   });
 
   return {
-    tools: unique.map(n => buildPiTool(n, cwd, spawnHook)),
+    toolNames: unique,
+    customTools: spawnHook
+      ? [createBashToolDefinition(cwd, { spawnHook }) as unknown as ToolDefinition]
+      : undefined,
     unknownTools,
   };
 }

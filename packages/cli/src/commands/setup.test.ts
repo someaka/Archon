@@ -140,9 +140,8 @@ CODEX_ACCOUNT_ID=account1
       expect(content).not.toMatch(/^DATABASE_URL=/m);
     });
 
-    it('should generate valid .env content for PostgreSQL configuration', () => {
+    it('should generate valid .env content with apiKey auth', () => {
       const content = generateEnvContent({
-        database: { type: 'postgresql', url: 'postgresql://localhost:5432/archon' },
         ai: {
           claude: true,
           claudeAuthType: 'apiKey',
@@ -155,12 +154,10 @@ CODEX_ACCOUNT_ID=account1
           github: false,
           telegram: false,
           slack: false,
-          discord: false,
         },
         botDisplayName: 'Archon',
       });
 
-      expect(content).toContain('DATABASE_URL=postgresql://localhost:5432/archon');
       expect(content).toContain('CLAUDE_USE_GLOBAL_AUTH=false');
       expect(content).toContain('CLAUDE_API_KEY=sk-test-key');
     });
@@ -334,37 +331,8 @@ CODEX_ACCOUNT_ID=account1
       expect(content).toContain('SLACK_STREAMING_MODE=batch');
     });
 
-    it('should include Discord configuration', () => {
-      const content = generateEnvContent({
-        database: { type: 'sqlite' },
-        ai: {
-          claude: true,
-          claudeAuthType: 'global',
-          codex: false,
-          hermes: false,
-          defaultAssistant: 'claude',
-        },
-        platforms: {
-          github: false,
-          telegram: false,
-          slack: false,
-          discord: true,
-        },
-        discord: {
-          botToken: 'discord-bot-token-test',
-          allowedUserIds: '123456789',
-        },
-        botDisplayName: 'Archon',
-      });
-
-      expect(content).toContain('DISCORD_BOT_TOKEN=discord-bot-token-test');
-      expect(content).toContain('DISCORD_ALLOWED_USER_IDS=123456789');
-      expect(content).toContain('DISCORD_STREAMING_MODE=batch');
-    });
-
     it('should include Hermes configuration when configured', () => {
       const content = generateEnvContent({
-        database: { type: 'sqlite' },
         ai: {
           claude: false,
           codex: false,
@@ -375,7 +343,7 @@ CODEX_ACCOUNT_ID=account1
           hermesBinaryPath: '/usr/local/bin/hermes',
           defaultAssistant: 'hermes',
         },
-        platforms: { github: false, telegram: false, slack: false, discord: false },
+        platforms: { github: false, telegram: false, slack: false },
         botDisplayName: 'Archon',
       });
 
@@ -388,7 +356,6 @@ CODEX_ACCOUNT_ID=account1
 
     it('should omit Hermes fields when not configured', () => {
       const content = generateEnvContent({
-        database: { type: 'sqlite' },
         ai: {
           claude: true,
           claudeAuthType: 'global',
@@ -396,7 +363,7 @@ CODEX_ACCOUNT_ID=account1
           hermes: false,
           defaultAssistant: 'claude',
         },
-        platforms: { github: false, telegram: false, slack: false, discord: false },
+        platforms: { github: false, telegram: false, slack: false },
         botDisplayName: 'Archon',
       });
 

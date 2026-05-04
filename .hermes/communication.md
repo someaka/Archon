@@ -12,13 +12,13 @@
 
 ### Active Issues
 
-| ID       | Issue                                                                       | Status  | Assigned   |
-| -------- | --------------------------------------------------------------------------- | ------- | ---------- |
-| CLAUDE-1 | Claude provider Ollama gateway integration                                  | DONE    | Debugger C |
-| CLAUDE-2 | e2e-claude-smoke uses `model: haiku` instead of `deepseek-v4-pro:cloud`     | DONE    | Debugger A |
-| PI-1     | e2e-pi-smoke uses `anthropic/claude-haiku-4-5` — wrong model for this setup | DONE    | Debugger B |
-| PI-2     | Pi auth.json empty — needs API key for the correct provider                 | DONE    | Debugger B |
-| VERIFY   | Re-run all 3 e2e smoke tests after fixes                                    | DONE    | Debugger C |
+| ID       | Issue                                                                       | Status | Assigned   |
+| -------- | --------------------------------------------------------------------------- | ------ | ---------- |
+| CLAUDE-1 | Claude provider Ollama gateway integration                                  | DONE   | Debugger C |
+| CLAUDE-2 | e2e-claude-smoke uses `model: haiku` instead of `deepseek-v4-pro:cloud`     | DONE   | Debugger A |
+| PI-1     | e2e-pi-smoke uses `anthropic/claude-haiku-4-5` — wrong model for this setup | DONE   | Debugger B |
+| PI-2     | Pi auth.json empty — needs API key for the correct provider                 | DONE   | Debugger B |
+| VERIFY   | Re-run all 3 e2e smoke tests after fixes                                    | DONE   | Debugger C |
 
 ### User's Actual Setup (DO NOT IGNORE)
 
@@ -207,11 +207,11 @@ CLAUDE_CODE_ATTRIBUTION_HEADER=0
 
 Debugger A's `detectAndConfigureOllamaGateway()` has these errors:
 
-| # | What Ollama Does | What Debugger A Does | Impact |
-|---|---|---|---|
-| 1 | `ANTHROPIC_BASE_URL=http://127.0.0.1:11434` | `ANTHROPIC_BASE_URL=http://localhost:11434/v1` | Wrong host AND extra `/v1` — Ollama's Anthropic-compatible endpoint is at root, not `/v1` |
-| 2 | `ANTHROPIC_API_KEY=ollama` (or similar) | `ANTHROPIC_AUTH_TOKEN=***` | Wrong env var name — Claude Code reads `ANTHROPIC_API_KEY`, not `ANTHROPIC_AUTH_TOKEN` |
-| 3 | Sets `ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL` | Doesn't set these at all | Claude Code may still try to validate against known Anthropic model names for tier resolution |
+| #   | What Ollama Does                                                     | What Debugger A Does                           | Impact                                                                                        |
+| --- | -------------------------------------------------------------------- | ---------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| 1   | `ANTHROPIC_BASE_URL=http://127.0.0.1:11434`                          | `ANTHROPIC_BASE_URL=http://localhost:11434/v1` | Wrong host AND extra `/v1` — Ollama's Anthropic-compatible endpoint is at root, not `/v1`     |
+| 2   | `ANTHROPIC_API_KEY=ollama` (or similar)                              | `ANTHROPIC_AUTH_TOKEN=***`                     | Wrong env var name — Claude Code reads `ANTHROPIC_API_KEY`, not `ANTHROPIC_AUTH_TOKEN`        |
+| 3   | Sets `ANTHROPIC_DEFAULT_OPUS_MODEL`, `_SONNET_MODEL`, `_HAIKU_MODEL` | Doesn't set these at all                       | Claude Code may still try to validate against known Anthropic model names for tier resolution |
 
 ### The Fix
 
@@ -228,6 +228,7 @@ env.ANTHROPIC_API_KEY = 'ollama';
 ```
 
 And after line 118, add the default model overrides:
+
 ```typescript
 env.ANTHROPIC_DEFAULT_OPUS_MODEL = model;
 env.ANTHROPIC_DEFAULT_SONNET_MODEL = model;
@@ -288,11 +289,11 @@ env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
 
 ### Summary
 
-| Test | Status | Model | Duration | Response |
-|------|--------|-------|----------|----------|
-| e2e-hermes-smoke | ✅ PASS | hermes (binary) | 8.1s | `HERMES_SMOKE_OK` |
-| e2e-pi-smoke | ✅ PASS | `opencode-go/kimi-k2.6` | 6.9s | `4` |
-| e2e-claude-smoke | ✅ PASS | `deepseek-v4-pro:cloud` (Ollama) | 22.3s | `4` |
+| Test             | Status  | Model                            | Duration | Response          |
+| ---------------- | ------- | -------------------------------- | -------- | ----------------- |
+| e2e-hermes-smoke | ✅ PASS | hermes (binary)                  | 8.1s     | `HERMES_SMOKE_OK` |
+| e2e-pi-smoke     | ✅ PASS | `opencode-go/kimi-k2.6`          | 6.9s     | `4`               |
+| e2e-claude-smoke | ✅ PASS | `deepseek-v4-pro:cloud` (Ollama) | 22.3s    | `4`               |
 
 **All 3 e2e smoke tests PASSED.** The auth/model validation issues are resolved. Claude provider successfully connects through the Ollama gateway with the correct environment variables (`ANTHROPIC_BASE_URL`, `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`, and `ANTHROPIC_DEFAULT_*_MODEL` overrides).
 
@@ -321,27 +322,33 @@ env.ANTHROPIC_DEFAULT_HAIKU_MODEL = model;
 **Date:** 2026-04-30 16:37 UTC
 
 ### 1. Workflow Name
+
 `pi-hermes-code-review`
 
 ### 2. Provider/Model Used
+
 - **Provider:** Pi (`opencode-go`)
 - **Model:** `kimi-k2.6`
 - **Session file:** `2026-04-30T14-37-16-115Z_019dded2-95d3-715c-a8a6-8f905f7aa3bb.jsonl`
 
 ### 3. Duration
+
 ~37 seconds (36,617 ms) before cancellation
 
 ### 4. Did it complete successfully?
+
 **No — CANCELLED during streaming.**
 
 The workflow was stopped via `dag.stop_detected_during_streaming`. The Pi model was still in its thinking/tool-use phase when the stop signal was received. No final text output was produced.
 
 ### 5. How many issues found?
+
 **0** — The model never reached the output phase. It was reading source files when cancelled.
 
 ### 6. Summary of findings (from session data)
 
 **What the model did before cancellation:**
+
 1. Received the code review prompt (496 chars) covering 5 Hermes provider files
 2. Began thinking about the task (531 chars thinking)
 3. Listed the `packages/providers/src/hermes/` directory via tool call
@@ -358,36 +365,39 @@ The workflow was stopped via `dag.stop_detected_during_streaming`. The Pi model 
 
 ### 7. Errors and Warnings
 
-| Type | Message | Impact |
-|------|---------|--------|
-| WARN | `pi.extensions_reload_failed` — `"paths[0] must be type string"` | Cosmetic — non-blocking |
-| ERROR | `dag_node_cancelled_during_streaming` — node cancelled after 36,617ms | Workflow did not complete |
-| ERROR | `dag_layer_had_failures` | Layer 0 had 1 failure |
-| RESULT | Exit code 1 — `"Workflow did not complete successfully"` | No review output produced |
+| Type   | Message                                                               | Impact                    |
+| ------ | --------------------------------------------------------------------- | ------------------------- |
+| WARN   | `pi.extensions_reload_failed` — `"paths[0] must be type string"`      | Cosmetic — non-blocking   |
+| ERROR  | `dag_node_cancelled_during_streaming` — node cancelled after 36,617ms | Workflow did not complete |
+| ERROR  | `dag_layer_had_failures`                                              | Layer 0 had 1 failure     |
+| RESULT | Exit code 1 — `"Workflow did not complete successfully"`              | No review output produced |
 
 ### Root Cause of Cancellation
+
 The DagNode received a stop signal while Pi was still streaming (thinking + tool calls). This was NOT a model failure — the model was actively reading code and preparing its review. The stop was triggered externally (logged as "Cancelled by user").
 
 ### Recommendation
+
 Re-run the workflow with a longer timeout or ensure no external stop signals are sent during Pi's warm-up phase. kimi-k2.6 with extended thinking can take 1-3 minutes before producing its first text output, especially when reading multiple large source files.
 
 ---
 
 ## VERIFIER RUN — Claude
 
-| Field | Value |
-|---|---|
-| **Workflow Name** | `e2e-claude-smoke` |
-| **Provider/Model** | Claude (via Ollama gateway) — `deepseek-v4-pro:cloud` at `http://127.0.0.1:11434` |
-| **Duration** | ~10.6s (simple node) + 7ms (assert node) ≈ **11s total** |
-| **Completed Successfully?** | ✅ **YES** |
-| **Model Response?** | ✅ Yes — model returned `4` to the prompt "What is 2+2?" |
-| **Issues Found** | N/A (smoke test, not a review) |
-| **Workflow Run ID** | `47f9cfc6ac1c2fd97b49a69e84447da5` |
+| Field                       | Value                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------- |
+| **Workflow Name**           | `e2e-claude-smoke`                                                                |
+| **Provider/Model**          | Claude (via Ollama gateway) — `deepseek-v4-pro:cloud` at `http://127.0.0.1:11434` |
+| **Duration**                | ~10.6s (simple node) + 7ms (assert node) ≈ **11s total**                          |
+| **Completed Successfully?** | ✅ **YES**                                                                        |
+| **Model Response?**         | ✅ Yes — model returned `4` to the prompt "What is 2+2?"                          |
+| **Issues Found**            | N/A (smoke test, not a review)                                                    |
+| **Workflow Run ID**         | `47f9cfc6ac1c2fd97b49a69e84447da5`                                                |
 
 ### Summary of Findings
 
 The Claude provider smoke test passed cleanly:
+
 1. **Provider resolution**: Claude provider resolved with `deepseek-v4-pro:cloud` model via Ollama gateway at `127.0.0.1:11434`
 2. **Auth**: Used global auth mode
 3. **Prompt response**: Model correctly answered "What is 2+2?" with "4"
@@ -410,9 +420,11 @@ The Claude provider smoke test passed cleanly:
 **Date:** 2026-04-30 16:38 UTC
 
 ### 1. Workflow Name
+
 `hermes-local-review`
 
 ### 2. Provider/Model Used
+
 - **Provider:** Hermes (local model via binary autodetect)
 - **Binary:** `/home/d/.local/bin/hermes`
 - **Model:** `mimo-v2.5-pro` (via xiaomi endpoint — per user's setup)
@@ -420,12 +432,15 @@ The Claude provider smoke test passed cleanly:
 - **Workflow Run ID:** `835c3578787e36270266b5896ba6de3b`
 
 ### 3. Duration
+
 ~61 seconds (60,633 ms for the review node)
 
 ### 4. Did it complete successfully?
+
 **✅ YES** — exit code 0, workflow completed successfully.
 
 ### 5. How many issues found?
+
 **11** — 5 bugs, 3 security concerns, 3 style/minor issues.
 
 ### 6. Summary of findings (first 500 chars of output)
@@ -440,31 +455,32 @@ The Claude provider smoke test passed cleanly:
 
 ### Full Findings Summary
 
-| # | Category | Issue |
-|---|----------|-------|
-| 1 | Bug | Static imports violate lazy-loading contract (session-resolver, resource-loader, options-translator import Pi SDK eagerly) |
-| 2 | Bug | `process.env` pollution without cleanup — env vars from `piConfig.env` never removed |
-| 3 | Bug | Race condition in `ensurePiPackageDirShim` — existsSync→mkdirSync→writeFileSync is TOCTOU |
-| 4 | Bug | Unsafe `err as Error` casts in event-bridge.ts (lines 233, 258) |
-| 5 | Bug | `tryParseStructuredOutput` false positive — forward-scan matches braces in prose |
-| 6 | Security | Path traversal in skill resolution — `join(root, rawName)` with no sanitization |
-| 7 | Security | Unrestricted model ID — zero validation, passed directly to Pi SDK |
-| 8 | Security | Arbitrary code execution via extensions (default enabled, no runtime guard) |
-| 9 | Style | `custom<T>()` unsafe cast — `undefined as unknown as T` |
-| 10 | Style | `mapPiEvent` missing null guard for `assistantMessageEvent` |
-| 11 | Style | Comment numbering in provider.ts (steps 4/5 used twice) |
+| #   | Category | Issue                                                                                                                      |
+| --- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Bug      | Static imports violate lazy-loading contract (session-resolver, resource-loader, options-translator import Pi SDK eagerly) |
+| 2   | Bug      | `process.env` pollution without cleanup — env vars from `piConfig.env` never removed                                       |
+| 3   | Bug      | Race condition in `ensurePiPackageDirShim` — existsSync→mkdirSync→writeFileSync is TOCTOU                                  |
+| 4   | Bug      | Unsafe `err as Error` casts in event-bridge.ts (lines 233, 258)                                                            |
+| 5   | Bug      | `tryParseStructuredOutput` false positive — forward-scan matches braces in prose                                           |
+| 6   | Security | Path traversal in skill resolution — `join(root, rawName)` with no sanitization                                            |
+| 7   | Security | Unrestricted model ID — zero validation, passed directly to Pi SDK                                                         |
+| 8   | Security | Arbitrary code execution via extensions (default enabled, no runtime guard)                                                |
+| 9   | Style    | `custom<T>()` unsafe cast — `undefined as unknown as T`                                                                    |
+| 10  | Style    | `mapPiEvent` missing null guard for `assistantMessageEvent`                                                                |
+| 11  | Style    | Comment numbering in provider.ts (steps 4/5 used twice)                                                                    |
 
 ### Model Output Quality
+
 ✅ **Yes, the model produced substantial text output** (not just thinking). The review is well-structured with categorized findings, specific file/line references, and a prioritized summary. The output quality is high — actionable with clear explanations of impact.
 
 ### 7. Errors and Warnings
 
-| Type | Message | Impact |
-|------|---------|--------|
-| WARN | `pi.extensions_reload_failed` — `"paths[0] must be type string"` | Cosmetic — non-blocking |
-| WARN | `acp.invalid_json` — "No auxiliary LLM provider configured" | Non-blocking — context compression will drop middle turns without summary |
-| WARN | `acp.invalid_session_update` — available_commands_update | Non-blocking — informational update ignored |
-| INFO | First attempt retried (`hermes.retrying_query` after 2s) | Second attempt succeeded — transient connection issue |
+| Type | Message                                                          | Impact                                                                    |
+| ---- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| WARN | `pi.extensions_reload_failed` — `"paths[0] must be type string"` | Cosmetic — non-blocking                                                   |
+| WARN | `acp.invalid_json` — "No auxiliary LLM provider configured"      | Non-blocking — context compression will drop middle turns without summary |
+| WARN | `acp.invalid_session_update` — available_commands_update         | Non-blocking — informational update ignored                               |
+| INFO | First attempt retried (`hermes.retrying_query` after 2s)         | Second attempt succeeded — transient connection issue                     |
 
 ---
 
@@ -475,19 +491,19 @@ The Claude provider smoke test passed cleanly:
 
 ### Issue Assessment & Fix Status
 
-| # | Verifier Finding | Classification | Action Taken |
-|---|-----------------|---------------|-------------|
-| 1 | Static imports in session-resolver.ts violating lazy-loading | **REAL BUG** — defense-in-depth | **FIXED** — Converted `import { SessionManager }` to `import type` + dynamic `await import()` inside `resolvePiSession()`. Prevents accidental static import elsewhere from breaking lazy-loading. All 8 session-resolver tests pass. |
-| 2 | process.env.PI_PACKAGE_DIR global mutation | **DOCUMENTED CONCERN** — intentional | **NOT FIXED** — Env var is needed for Pi's config.js, stable across calls, and restoring it would be race-prone with concurrent sendQuery() calls. Existing comments document the trade-off. |
-| 3 | Path traversal in `resolvePiSkills` — `join(root, rawName)` with no sanitization | **REAL SECURITY BUG** | **FIXED** — Added validation rejecting skill names containing `..`, `/`, or `\`. Names failing validation are reported as `missing`. All 34 options-translator tests pass. |
-| 4 | Extensions default-on security risk | **REAL SECURITY BUG** — repo-controlled `.pi/extensions/` auto-loaded | **FIXED** — Changed `enableExtensions !== false` (default ON) to `=== true` (default OFF). Aligns with `PiProviderDefaults` interface `@default false` docs. Updated 4 tests to match new default. All 59 provider tests pass. |
-| 5 | Custom\<T\>() type safety | **NOT FOUND** — no Custom\<T\>() exists in Pi provider code | **SKIPPED** — False positive |
-| 6 | modelRegistry.getError?.() optional chaining | **STYLE** — defensive, works correctly | **NOT FIXED** — Not a bug |
-| 7 | Duplicate number prefix in comments | **STYLE** | **NOT FIXED** — Not a bug |
-| 8 | Static import discrepancy (same as #1) | **FIXED** with #1 | See #1 |
-| 9 | bridgeSession prompt promise can hang | **REAL BUG** — indefinite hang if Pi's prompt() gets stuck | **FIXED** — Added 30s timeout to `await promptPromise.catch()` in `finally` block via `Promise.race`. Prevents generator from hanging forever on stuck model/abort. All 41 event-bridge tests pass. |
-| 10 | PI_PACKAGE_DIR documentation gap | **DOCUMENTATION** | **NOT FIXED** — Existing comments are thorough |
-| 11 | setFlagValue silently no-ops without extensionRunner | **REAL BUG** — silent failure | **FIXED** — Added `getLog().warn()` when `extensionRunner` is undefined but extensionFlags were provided. |
+| #   | Verifier Finding                                                                 | Classification                                                        | Action Taken                                                                                                                                                                                                                          |
+| --- | -------------------------------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Static imports in session-resolver.ts violating lazy-loading                     | **REAL BUG** — defense-in-depth                                       | **FIXED** — Converted `import { SessionManager }` to `import type` + dynamic `await import()` inside `resolvePiSession()`. Prevents accidental static import elsewhere from breaking lazy-loading. All 8 session-resolver tests pass. |
+| 2   | process.env.PI_PACKAGE_DIR global mutation                                       | **DOCUMENTED CONCERN** — intentional                                  | **NOT FIXED** — Env var is needed for Pi's config.js, stable across calls, and restoring it would be race-prone with concurrent sendQuery() calls. Existing comments document the trade-off.                                          |
+| 3   | Path traversal in `resolvePiSkills` — `join(root, rawName)` with no sanitization | **REAL SECURITY BUG**                                                 | **FIXED** — Added validation rejecting skill names containing `..`, `/`, or `\`. Names failing validation are reported as `missing`. All 34 options-translator tests pass.                                                            |
+| 4   | Extensions default-on security risk                                              | **REAL SECURITY BUG** — repo-controlled `.pi/extensions/` auto-loaded | **FIXED** — Changed `enableExtensions !== false` (default ON) to `=== true` (default OFF). Aligns with `PiProviderDefaults` interface `@default false` docs. Updated 4 tests to match new default. All 59 provider tests pass.        |
+| 5   | Custom\<T\>() type safety                                                        | **NOT FOUND** — no Custom\<T\>() exists in Pi provider code           | **SKIPPED** — False positive                                                                                                                                                                                                          |
+| 6   | modelRegistry.getError?.() optional chaining                                     | **STYLE** — defensive, works correctly                                | **NOT FIXED** — Not a bug                                                                                                                                                                                                             |
+| 7   | Duplicate number prefix in comments                                              | **STYLE**                                                             | **NOT FIXED** — Not a bug                                                                                                                                                                                                             |
+| 8   | Static import discrepancy (same as #1)                                           | **FIXED** with #1                                                     | See #1                                                                                                                                                                                                                                |
+| 9   | bridgeSession prompt promise can hang                                            | **REAL BUG** — indefinite hang if Pi's prompt() gets stuck            | **FIXED** — Added 30s timeout to `await promptPromise.catch()` in `finally` block via `Promise.race`. Prevents generator from hanging forever on stuck model/abort. All 41 event-bridge tests pass.                                   |
+| 10  | PI_PACKAGE_DIR documentation gap                                                 | **DOCUMENTATION**                                                     | **NOT FIXED** — Existing comments are thorough                                                                                                                                                                                        |
+| 11  | setFlagValue silently no-ops without extensionRunner                             | **REAL BUG** — silent failure                                         | **FIXED** — Added `getLog().warn()` when `extensionRunner` is undefined but extensionFlags were provided.                                                                                                                             |
 
 ### Files Modified
 

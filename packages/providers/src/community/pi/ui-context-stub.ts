@@ -1,9 +1,11 @@
 import type {
+  AutocompleteProviderFactory,
   ExtensionUIContext,
   ExtensionUIDialogOptions,
   ExtensionWidgetOptions,
   TerminalInputHandler,
   Theme,
+  WorkingIndicatorOptions,
 } from '@mariozechner/pi-coding-agent';
 
 import type { MessageChunk } from '../../types';
@@ -154,6 +156,15 @@ export function createArchonUIContext(bridge: ArchonUIBridge): ExtensionUIContex
       return false;
     },
     setToolsExpanded(_expanded: boolean): void {
+      noop();
+    },
+    setWorkingVisible(_visible: boolean): void {
+      noop();
+    },
+    setWorkingIndicator(_options?: WorkingIndicatorOptions): void {
+      noop();
+    },
+    addAutocompleteProvider(_factory: AutocompleteProviderFactory): void {
       noop();
     },
   };

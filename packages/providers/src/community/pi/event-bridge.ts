@@ -211,16 +211,6 @@ export function mapPiEvent(event: AgentSessionEvent): MessageChunk[] {
   }
 }
 
-/**
- * Internal queue payload for `bridgeSession`. Exported at module scope
- * (not inside the generator) so unit tests can exercise each variant
- * independently without reaching into the generator's closure.
- */
-export type BridgeQueueItem =
-  | { kind: 'chunk'; chunk: MessageChunk }
-  | { kind: 'done' }
-  | { kind: 'error'; error: Error };
-
 /** Lets the UI stub push notifications into the session's chunk queue. */
 export interface BridgeNotifier {
   setEmitter(fn: ((chunk: MessageChunk) => void) | undefined): void;
