@@ -506,7 +506,7 @@ describe('HermesProvider', () => {
     expect(caps.hooks).toBe(false);
     expect(caps.skills).toBe(false);
     expect(caps.agents).toBe(false);
-    expect(caps.toolRestrictions).toBe(false);
+    expect(caps.toolRestrictions).toBe(true);
     expect(caps.structuredOutput).toBe(false);
     expect(caps.envInjection).toBe(true);
     expect(caps.costControl).toBe(false);

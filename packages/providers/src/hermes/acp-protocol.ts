@@ -237,10 +237,24 @@ export interface PromptResponseUsage {
   totalTokens?: number;
 }
 
-// TODO(#acp-usage-update): Add UsageUpdate to SessionUpdateUnion when the ACP spec
-// stabilizes the usage_update notification. Currently excluded because the Draft RFD
-// shape is unstable and events of this type hit the debug log in event-bridge.
-export type SessionUpdateUnion = AgentMessageChunkUpdate | AgentThoughtChunkUpdate | ToolCallUpdate;
+/**
+ * ACP available_commands_update — Hermes sends this on session/new to report
+ * available slash commands. Non-critical informational update.
+ */
+export interface AvailableCommandsUpdate {
+  sessionUpdate: 'available_commands_update';
+  availableCommands?: { name: string; description?: string }[];
+}
+
+// TODO(#acp-usage-update): Shape is Draft RFD. Added to union so events pass
+// validation and reach the debug log (unrecognized_session_update) instead of
+// the warn log (invalid_session_update).
+export type SessionUpdateUnion =
+  | AgentMessageChunkUpdate
+  | AgentThoughtChunkUpdate
+  | ToolCallUpdate
+  | UsageUpdate
+  | AvailableCommandsUpdate;
 
 /** The params payload of a `session/update` notification. */
 export interface SessionUpdateParams {
@@ -269,7 +283,9 @@ export function isSessionUpdateParams(obj: unknown): obj is SessionUpdateParams 
     update.sessionUpdate === 'agent_message_chunk' ||
     update.sessionUpdate === 'agent_thought_chunk' ||
     update.sessionUpdate === 'tool_call' ||
-    update.sessionUpdate === 'tool_call_update'
+    update.sessionUpdate === 'tool_call_update' ||
+    update.sessionUpdate === 'usage_update' ||
+    update.sessionUpdate === 'available_commands_update'
   );
 }
 

@@ -29,7 +29,7 @@ export const HERMES_CAPABILITIES: ProviderCapabilities = {
   hooks: false,
   skills: false,
   agents: false,
-  toolRestrictions: false,
+  toolRestrictions: true, // Translated to prompt instructions (ACP has no native tool filtering)
   structuredOutput: false,
   envInjection: true,
   costControl: false,

@@ -1,0 +1,146 @@
+name: archon-validate-pr
+description: |
+  Use when: User wants a thorough PR validation that tests both main (bug present) and feature branch (bug fixed).
+  Triggers: "validate PR", "validate pr #123", "test this PR", "verify PR", "full PR validation",
+            "validate pull request", "test PR end-to-end".
+  Does: Fetches PR info -> finds free ports -> parallel code review (main vs feature) ->
+        E2E test on main (reproduce bug) -> E2E test on feature (verify fix) -> final verdict report.
+  NOT for: Quick code-only reviews (use archon-smart-pr-review), fixing issues, general exploration.
+
+  This workflow is designed for running in parallel — each instance finds its own free ports
+  to avoid conflicts. Produces artifacts in $ARTIFACTS_DIR/ and posts a validation report.
+
+provider: hermes
+
+nodes:
+  - id: fetch-pr
+    bash: |
+      # Extract PR number from arguments
+      PR_NUMBER=$(echo "$ARGUMENTS" | grep -oE '/pull/[0-9]+' | grep -oE '[0-9]+' | head -1)
+      # Fallback: extract first number if no URL path found (e.g., "validate PR 42")
+      if [ -z "$PR_NUMBER" ]; then
+        PR_NUMBER=$(echo "$ARGUMENTS" | grep -oE '[0-9]+' | head -1)
+      fi
+      if [ -z "$PR_NUMBER" ]; then
+        # Try getting PR from current branch
+        PR_NUMBER=$(gh pr view --json number -q '.number' 2>/dev/null)
+      fi
+
+      if [ -z "$PR_NUMBER" ]; then
+        echo "ERROR: No PR number found in arguments: $ARGUMENTS"
+        exit 1
+      fi
+
+      echo "$PR_NUMBER" > "$ARTIFACTS_DIR/.pr-number"
+
+      # Fetch full PR details
+      gh pr view "$PR_NUMBER" --json number,title,body,url,headRefName,baseRefName,files,additions,deletions,changedFiles,state,author,labels,isDraft
+
+  - id: find-ports
+    bash: |
+      # Use Bun to let the OS pick truly free ports (cross-platform: Linux, macOS, Windows)
+      BACKEND_PORT=$(bun -e "const s = Bun.serve({port: 0, fetch: () => new Response('')}); console.log(s.port); s.stop()")
+      FRONTEND_PORT=$(bun -e "const s = Bun.serve({port: 0, fetch: () => new Response('')}); console.log(s.port); s.stop()")
+
+      echo "$BACKEND_PORT" > "$ARTIFACTS_DIR/.backend-port"
+      echo "$FRONTEND_PORT" > "$ARTIFACTS_DIR/.frontend-port"
+
+      echo "BACKEND_PORT=$BACKEND_PORT"
+      echo "FRONTEND_PORT=$FRONTEND_PORT"
+
+  - id: resolve-paths
+    bash: |
+      # Resolve canonical repo path (main branch) vs worktree path (feature branch)
+      CANONICAL_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')
+      WORKTREE_PATH=$(pwd)
+      FEATURE_BRANCH=$(git branch --show-current)
+
+      # Get PR branch info
+      PR_NUMBER=$(cat "$ARTIFACTS_DIR/.pr-number")
+      PR_HEAD=$(gh pr view "$PR_NUMBER" --json headRefName -q '.headRefName')
+      PR_BASE=$(gh pr view "$PR_NUMBER" --json baseRefName -q '.baseRefName')
+
+      echo "$CANONICAL_REPO" > "$ARTIFACTS_DIR/.canonical-repo"
+      echo "$WORKTREE_PATH" > "$ARTIFACTS_DIR/.worktree-path"
+      echo "$FEATURE_BRANCH" > "$ARTIFACTS_DIR/.feature-branch"
+      echo "$PR_HEAD" > "$ARTIFACTS_DIR/.pr-head"
+      echo "$PR_BASE" > "$ARTIFACTS_DIR/.pr-base"
+
+      echo "CANONICAL_REPO=$CANONICAL_REPO"
+      echo "WORKTREE_PATH=$WORKTREE_PATH"
+      echo "FEATURE_BRANCH=$FEATURE_BRANCH"
+      echo "PR_HEAD=$PR_HEAD"
+      echo "PR_BASE=$PR_BASE"
+    depends_on: [fetch-pr]
+
+  - id: code-review-main
+    command: archon-validate-pr-code-review-main
+    depends_on: [fetch-pr, resolve-paths]
+    context: fresh
+
+  - id: code-review-feature
+    command: archon-validate-pr-code-review-feature
+    depends_on: [fetch-pr, resolve-paths, code-review-main]
+    context: fresh
+
+  - id: classify-testability
+    prompt: |
+      You are a PR testability classifier. Determine whether this PR's changes can be
+      validated via browser E2E testing, or if it requires code-review-only validation.
+
+      ## PR Details
+
+      $fetch-pr.output
+
+      ## Rules
+
+      - **e2e_testable**: Changes affect the Web UI (components, hooks, styles, API routes
+        that serve the frontend, SSE streaming, layout, user-visible behavior). These can be
+        validated by starting Archon and using agent-browser to interact with the UI.
+      - **code_review_only**: Changes are purely backend logic, CLI-only, workflow engine,
+        database schemas, git operations, build tooling, tests, documentation, or other
+        non-UI code. No visual validation possible.
+
+      Consider: even if a change is backend, if it affects what the frontend displays
+      (e.g., API response format changes, SSE event changes), it IS e2e_testable.
+    depends_on: [fetch-pr]
+    allowed_tools: []
+    output_format:
+      type: object
+      properties:
+        testable:
+          type: string
+          enum: ["e2e_testable", "code_review_only"]
+        reasoning:
+          type: string
+        test_plan:
+          type: string
+      required: [testable, reasoning, test_plan]
+
+  - id: final-report
+    prompt: |
+      You are a PR validation report writer. Synthesize all findings into a final verdict.
+
+      ## PR Details
+      $fetch-pr.output
+
+      ## Code Review — Main Branch
+      $code-review-main.output
+
+      ## Code Review — Feature Branch
+      $code-review-feature.output
+
+      ## Testability Assessment
+      $classify-testability.output
+
+      Write a structured validation report with:
+      1. PR summary (title, author, files changed, additions/deletions)
+      2. Main branch analysis (bug/gap confirmed?)
+      3. Feature branch analysis (fix correct and complete?)
+      4. Issues found (if any)
+      5. Final verdict: APPROVE / REQUEST_CHANGES / NEEDS_DISCUSSION
+      6. Confidence level (HIGH / MEDIUM / LOW)
+
+      Be concise and actionable. Reference specific files and line numbers.
+    depends_on: [code-review-main, code-review-feature, classify-testability]
+    trigger_rule: all_done

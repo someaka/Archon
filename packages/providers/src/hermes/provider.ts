@@ -6,6 +6,7 @@ import type {
   HermesProviderDefaults,
   IAgentProvider,
   MessageChunk,
+  NodeConfig,
   ProviderCapabilities,
   SendQueryOptions,
 } from '../types';
@@ -142,6 +143,44 @@ export function getFirstEventTimeoutMs(): number {
  * honest; the dag-executor emits warnings for any nodeConfig field not
  * supported.
  */
+
+/**
+ * Translate tool restrictions (allowed_tools / denied_tools) into prompt
+ * instructions for Hermes. ACP has no native tool filtering, so the only
+ * way to restrict which tools the agent uses is via prompt engineering.
+ *
+ * When `allowed_tools` is empty array, it means "no tools" — the agent
+ * should respond without using any tools. When `allowed_tools` is a list,
+ * the agent should only use those tools. When `denied_tools` is set, the
+ * agent should avoid those tools.
+ */
+function injectToolRestrictions(prompt: string, nodeConfig?: NodeConfig): string {
+  if (!nodeConfig) return prompt;
+
+  const allowedTools = nodeConfig.allowed_tools;
+  const deniedTools = nodeConfig.denied_tools;
+  if (allowedTools === undefined && deniedTools === undefined) return prompt;
+
+  const instructions: string[] = [];
+
+  if (allowedTools?.length === 0) {
+    instructions.push(
+      '**TOOL RESTRICTION: Do NOT use any tools.** Respond using only your knowledge and the context provided. Do not read files, run commands, or use any external tools.'
+    );
+  } else if (allowedTools !== undefined && allowedTools.length > 0) {
+    instructions.push(
+      `**TOOL RESTRICTION: Use ONLY the following tools: ${allowedTools.join(', ')}.** Do not use any other tools.`
+    );
+  }
+
+  if (deniedTools !== undefined && deniedTools.length > 0) {
+    instructions.push(`**TOOL RESTRICTION: Do NOT use these tools: ${deniedTools.join(', ')}.**`);
+  }
+
+  if (instructions.length === 0) return prompt;
+  return `${instructions.join('\n')}\n\n${prompt}`;
+}
+
 export class HermesProvider implements IAgentProvider {
   constructor(
     private pool: HermesSessionPool = defaultSessionPool,
@@ -230,6 +269,10 @@ export class HermesProvider implements IAgentProvider {
     //    model/provider from ~/.hermes/config.yaml. Live config is authoritative for
     //    model/provider — Archon config provides operational settings only.
     const config = await buildHermesConfig(options?.assistantConfig ?? {});
+
+    // 1a. Translate tool restrictions into prompt instructions. ACP has no
+    //     native tool filtering, so we inject instructions directly.
+    prompt = injectToolRestrictions(prompt, options?.nodeConfig);
 
     // 2. Resolve session context (cwd, env).
     const session = resolveHermesSession({

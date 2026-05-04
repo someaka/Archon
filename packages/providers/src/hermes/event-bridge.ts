@@ -90,7 +90,14 @@ export function normalizeAcpUsage(usage: Record<string, unknown>): TokenUsage | 
 // Prevents unbounded memory growth if the child process writes binary garbage.
 
 const REQUEST_TIMEOUT_MS = 30000;
-const PROMPT_TIMEOUT_MS = 300_000; // 5 minutes for model inference
+// Configurable via ARCHON_HERMES_PROMPT_TIMEOUT_MS. Default 1800s (30 min) to match
+// Hermes's own gateway_timeout. Complex workflows with many tool calls can easily
+// exceed 5 minutes — especially with slower models/proxies.
+function getPromptTimeoutMs(): number {
+  const env = parseInt(process.env.ARCHON_HERMES_PROMPT_TIMEOUT_MS ?? '', 10);
+  return env > 0 ? env : 1_800_000; // 30 minutes
+}
+const PROMPT_TIMEOUT_MS = getPromptTimeoutMs();
 const MAX_LINE_BUFFER_LENGTH = 1024 * 1024; // 1 MiB
 
 export function redactSecrets(text: string): string {
