@@ -176,21 +176,38 @@ export async function* bridgeHermesSession(
 
   // ── Progress heartbeat (60s) — eliminates blind waiting ──────────────
   // Tracks current step so logs show WHAT we're waiting on, not just THAT
-  // we're waiting.
+  // we're waiting. Also doubles as a stall detector: if no new chunks arrive
+  // for STALL_TIMEOUT_MS (5 min), the bridge assumes the hermes process is deadlocked
+  // and force-kills it rather than waiting the full PROMPT_TIMEOUT_MS (30 min).
   const bridgeStart = Date.now();
   let bridgeStep: 'handshake' | 'waiting_prompt' | 'consuming_chunks' | 'terminal' = 'handshake';
   let bridgeChunkCount = 0;
   let bridgeLastChunkType = 'none';
+  let bridgeLastChunkAt = bridgeStart;
+  const STALL_TIMEOUT_MS = 300_000; // 5 min — matches common API streaming timeouts
   const bridgeHeartbeat = setInterval(() => {
+    const now = Date.now();
+    const stalled = bridgeStep === 'waiting_prompt' && now - bridgeLastChunkAt > STALL_TIMEOUT_MS;
     getLog().info(
       {
-        elapsed_ms: Date.now() - bridgeStart,
+        elapsed_ms: now - bridgeStart,
         step: bridgeStep,
         chunks: bridgeChunkCount,
         last_type: bridgeLastChunkType,
+        stalled,
+        stall_ms: now - bridgeLastChunkAt,
       },
       'acp.bridge_heartbeat'
     );
+    if (stalled) {
+      getLog().warn({ stall_ms: now - bridgeLastChunkAt }, 'acp.bridge_stalled_killing_child');
+      try {
+        childProcess.kill('SIGKILL');
+      } catch {
+        /* already dead */
+      }
+      // SIGKILL will trigger the 'exit' handler which emits a terminal error chunk
+    }
   }, 60_000);
   bridgeHeartbeat.unref(); // don't keep process alive
 
@@ -267,6 +284,7 @@ export async function* bridgeHermesSession(
           }
           const update = params.update;
           bridgeChunkCount++;
+          bridgeLastChunkAt = Date.now();
           if (update.sessionUpdate === 'agent_message_chunk') {
             bridgeLastChunkType = 'assistant';
             queue.push({
