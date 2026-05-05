@@ -706,6 +706,13 @@ async function executeNodeInternal(
   const effectiveIdleTimeout = node.idle_timeout ?? STEP_IDLE_TIMEOUT_MS;
   let lastToolStartedAt: { toolName: string; startedAt: number } | null = null;
 
+  // ── Per-node progress tracking ────────────────────────────────────
+  // Eliminates blind waiting: log every 30s with exact chunk counts.
+  let nodeChunkCounter = 0;
+  let nodeLastChunkType = 'none';
+  let nodeLastProgressLog = 0;
+  const PROGRESS_LOG_INTERVAL_MS = 30_000;
+
   try {
     for await (const msg of withIdleTimeout(
       aiClient.sendQuery(finalPrompt, cwd, resumeSessionId, nodeOptionsWithAbort),
@@ -721,6 +728,29 @@ async function executeNodeInternal(
     )) {
       const tickNow = Date.now();
       const nodeKey = `${workflowRun.id}:${node.id}`;
+
+      // ── Debug: log EVERY chunk type at trace level ───────────────────
+      getLog().debug(
+        { nodeId: node.id, chunk_type: msg.type, chunk_counter: nodeChunkCounter },
+        'dag.node_chunk'
+      );
+
+      // ── Progress log (every 30s) ─────────────────────────────────
+      nodeChunkCounter++;
+      nodeLastChunkType = msg.type;
+      if (tickNow - nodeLastProgressLog > PROGRESS_LOG_INTERVAL_MS) {
+        nodeLastProgressLog = tickNow;
+        getLog().info(
+          {
+            nodeId: node.id,
+            chunks: nodeChunkCounter,
+            last_type: nodeLastChunkType,
+            elapsed_s: Math.round((tickNow - nodeStartTime) / 1000),
+            stream: streamingMode,
+          },
+          'dag.node_progress'
+        );
+      }
 
       // Cancel/pause check — read-only, no write contention in WAL mode (every 10s).
       //

@@ -265,10 +265,17 @@ export class HermesProvider implements IAgentProvider {
     resumeSessionId?: string,
     options?: SendQueryOptions
   ): AsyncGenerator<MessageChunk> {
+    const providerStart = Date.now();
+    getLog().info(
+      { cwd, model: options?.model, fresh: options?.freshSession },
+      'hermes.sendQuery_started'
+    );
+
     // 1. Build effective config: merge Archon operational settings with live hermes
     //    model/provider from ~/.hermes/config.yaml. Live config is authoritative for
     //    model/provider — Archon config provides operational settings only.
     const config = await buildHermesConfig(options?.assistantConfig ?? {});
+    getLog().debug({ elapsed_ms: Date.now() - providerStart }, 'hermes.config_built');
 
     // 1a. Translate tool restrictions into prompt instructions. ACP has no
     //     native tool filtering, so we inject instructions directly.
@@ -280,6 +287,10 @@ export class HermesProvider implements IAgentProvider {
       env: options?.env,
       resumeSessionId,
     });
+    getLog().debug(
+      { elapsed_ms: Date.now() - providerStart, cwd: session.cwd },
+      'hermes.session_resolved'
+    );
 
     // Determine model key for pool lookup.
     const model = options?.model ?? config.model ?? 'default';
@@ -401,6 +412,10 @@ export class HermesProvider implements IAgentProvider {
     );
 
     // 5. Create HermesAcpClient — spawns `hermes acp` with piped stdio.
+    getLog().debug(
+      { elapsed_ms: Date.now() - providerStart, binary: hermesBinary },
+      'hermes.spawning_acp_client'
+    );
     const client = new HermesAcpClient({
       binary: hermesBinary,
       args: ['acp'],

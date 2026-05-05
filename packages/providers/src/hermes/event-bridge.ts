@@ -174,6 +174,26 @@ export async function* bridgeHermesSession(
   const MAX_STDERR_LINES = 50;
   const stderrLines: string[] = [];
 
+  // ── Progress heartbeat (60s) — eliminates blind waiting ──────────────
+  // Tracks current step so logs show WHAT we're waiting on, not just THAT
+  // we're waiting.
+  const bridgeStart = Date.now();
+  let bridgeStep: 'handshake' | 'waiting_prompt' | 'consuming_chunks' | 'terminal' = 'handshake';
+  let bridgeChunkCount = 0;
+  let bridgeLastChunkType = 'none';
+  const bridgeHeartbeat = setInterval(() => {
+    getLog().info(
+      {
+        elapsed_ms: Date.now() - bridgeStart,
+        step: bridgeStep,
+        chunks: bridgeChunkCount,
+        last_type: bridgeLastChunkType,
+      },
+      'acp.bridge_heartbeat'
+    );
+  }, 60_000);
+  bridgeHeartbeat.unref(); // don't keep process alive
+
   // ── stdout: line-by-line ACP JSON-RPC parser ──────────────────────────
   // ACP uses newline-delimited JSON. We buffer for partial lines and
   // parse each complete line as a JSON-RPC message.
@@ -246,17 +266,21 @@ export async function* bridgeHermesSession(
             continue;
           }
           const update = params.update;
+          bridgeChunkCount++;
           if (update.sessionUpdate === 'agent_message_chunk') {
+            bridgeLastChunkType = 'assistant';
             queue.push({
               kind: 'chunk',
               chunk: { type: 'assistant', content: update.content.text },
             });
           } else if (update.sessionUpdate === 'agent_thought_chunk') {
+            bridgeLastChunkType = 'thinking';
             queue.push({
               kind: 'chunk',
               chunk: { type: 'thinking', content: update.content.text },
             });
           } else if (isToolCallUpdate(update)) {
+            bridgeLastChunkType = update.status === 'running' ? 'tool' : 'tool_result';
             if (update.status === 'running') {
               queue.push({
                 kind: 'chunk',
@@ -617,6 +641,7 @@ export async function* bridgeHermesSession(
       sessionId = options.existingSessionId;
     }
 
+    bridgeStep = 'waiting_prompt';
     // ── prompt + terminal logic (concurrent with consumer) ────────────
     // Wrapped in a function so it can run concurrently with the consumer
     // loop below. Without this, session/update notifications pushed to
@@ -730,6 +755,17 @@ export async function* bridgeHermesSession(
       yield item.chunk;
     }
   } finally {
+    // Clean up heartbeat
+    clearInterval(bridgeHeartbeat);
+    bridgeStep = 'terminal';
+    getLog().info(
+      {
+        elapsed_ms: Date.now() - bridgeStart,
+        chunks: bridgeChunkCount,
+        last_type: bridgeLastChunkType,
+      },
+      'acp.bridge_completed'
+    );
     // Clean up: close queue, remove abort listener, clear sigkill timer.
     queue.close();
 
